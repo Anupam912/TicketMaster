@@ -1,78 +1,70 @@
-# WhatsApp Clone with Video Calls
+# Scalable Event Booking API
 
-![Project Logo](https://play-lh.googleusercontent.com/bYtqbOcTYOlgc6gqZ2rwb8lptHuwlNE75zYJu6Bn076-hTmvd96HH-6v7S0YUAAJXoJN)
+A high-concurrency event ticketing system built with Go, PostgreSQL, and Redis.
 
-## About
+- **Concurrency Control**: Database transactions with optimistic/pessimistic locking
+- **Virtual Waiting Room**: Rate limiting and queue management
+- **Caching**: Redis-based caching for event details
+- **Booking Lifecycle**: Reserve → Purchase → Release with automatic timeout
 
-This project is a WhatsApp clone with video call functionality, built using React.js, Node.js, MongoDB, Socket.io, and WebRTC. It allows users to send text messages, images, and make video calls in real-time, similar to the popular messaging application WhatsApp.
+## Tech Stack
+
+- **Backend**: Go (Golang)
+- **Database**: PostgreSQL
+- **Cache/Queue**: Redis
 
 ## Features
 
-- User registration and authentication.
-- Real-time text messaging with individual and group chat support.
-- Image sharing within chats.
-- Dcouments sharing within chats.
-- Video calling with peer-to-peer WebRTC technology.
-- Filterization between chats
-- End-to-end encryption for secure messaging.
+### Core Features
+- User authentication with JWT
+- Role-based access control (Admin/User)
+- Event and venue management
+- Seat booking with concurrency control
+- Booking lifecycle: Reserve (10min) → Purchase → Release
 
-## Demo
-
-![image](https://github.com/piyushyadav0191/Full-Stack-Whatsapp-Clone/assets/84402719/0dedda2e-6111-4c40-95a6-55ac67388629)
-
-You can experience the project by visiting our [live demo](https://whatsapp-clone-frontend-liart.vercel.app/).
-
-## Getting Started
-
-### Prerequisites
-
-Before you begin, ensure you have met the following requirements:
-
-- Node.js and npm installed on your development machine.
-- MongoDB installed and running.
-- WebRTC-compatible browsers (e.g., Chrome, Firefox).
+### Advanced Features
+- **Asynchronous Processing**: Event-driven architecture with Redis Streams for handling 50K+ concurrent requests
+- **Idempotency**: Prevents duplicate charges with idempotency keys (critical for financial systems)
+- **Real-Time Updates**: WebSocket server for live seat availability updates
+- **Database Scaling**: Read replica support for horizontal read scaling
+- Database transactions with row-level locking
+- Redis caching for event data
+- Rate limiting for high-traffic scenarios
+- Virtual waiting room for ticket drops
 
 ### Installation
 
-1. Clone the repository:
+1. Clone the repository
+2. Install dependencies:
+```bash
+go mod download
+```
 
-   ``` bash
-   git clone https://github.com/piyushyadav0191/Full-Stack-Whatsapp-Clone.git
-   ```
+3. Set up environment variables:
+```bash
+cp .env.example .env
+# Edit .env with your database and Redis credentials
+```
 
-2. Change to the project directory:
+4. Run database migrations:
+```bash
+go run cmd/migrate/main.go
+```
 
-   ``` bash
-   cd whatsapp-clone
-    ```
+5. Start the server:
+```bash
+go run cmd/server/main.go
+```
 
-3. Install server dependencies and start server:
+## Concurrency Control
 
-   ``` bash
-   cd backend && yarn && yarn dev
-   ```
+The system uses PostgreSQL's `SELECT FOR UPDATE` with `NOWAIT` to prevent double-booking. When a user reserves a seat, the row is locked until the transaction completes, ensuring atomicity.
 
-4. Install client dependencies and start server:
 
-    ``` bash
-    cd frontend && yarn && yarn start
-    ```
+**Asynchronous Booking Processing**: Uses Redis Streams as a message queue to handle traffic spikes. API returns HTTP 202 (Accepted) immediately while background workers process requests.
 
-5. Copy your environment variables in both frontend and backend in new .env file same as .env.example
+**Idempotency for Payments**: Middleware prevents duplicate charges when network requests fail. Uses idempotency keys stored in Redis with 24-hour TTL.
 
-### Usage
+**Real-Time Seat Availability**: WebSocket server broadcasts seat status changes to all connected clients, eliminating the need for polling.
 
-1. Visit [http://localhost:3000] in your web browser to access the WhatsApp clone application.
-
-2. Register a new account or log in with existing credentials.
-
-3. Explore the application's features, including text messaging, image sharing, and video calls.
-
-### Technologies Used
-
-React.js
-Node.js
-MongoDB
-Socket.io
-WebRTC
-Redux toolkit
+**Database Read Replicas**: Supports read/write separation with automatic failover. Read queries use replicas, writes use primary database.
