@@ -32,7 +32,35 @@ A high-concurrency event ticketing system built with Go, PostgreSQL, and Redis.
 - Rate limiting for high-traffic scenarios
 - Virtual waiting room for ticket drops
 
-### Installation
+### Quick Start with Docker
+
+The easiest way to run the application is using Docker:
+
+```bash
+# Build and start all services
+make up
+
+# Run database migrations (first time only)
+make migrate
+
+# View logs
+make logs
+```
+
+The API will be available at `http://localhost:8080`.
+
+**Available Make commands:**
+- `make up` - Start all services
+- `make down` - Stop all services
+- `make migrate` - Run database migrations
+- `make logs` - View logs
+- `make clean` - Remove containers and volumes
+- `make shell-db` - Open psql shell
+- `make help` - Show all commands
+
+### Manual Installation
+
+If you prefer running without Docker:
 
 1. Clone the repository
 2. Install dependencies:
@@ -46,12 +74,14 @@ cp .env.example .env
 # Edit .env with your database and Redis credentials
 ```
 
-4. Run database migrations:
+4. Start PostgreSQL and Redis locally
+
+5. Run database migrations:
 ```bash
 go run cmd/migrate/main.go
 ```
 
-5. Start the server:
+6. Start the server:
 ```bash
 go run cmd/server/main.go
 ```

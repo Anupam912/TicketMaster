@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -12,8 +11,6 @@ import (
 	"event-ticketing-system/internal/queue"
 	"event-ticketing-system/internal/repository"
 	"event-ticketing-system/internal/websocket"
-
-	"github.com/google/uuid"
 )
 
 type BookingWorker struct {

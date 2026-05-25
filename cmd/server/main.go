@@ -12,13 +12,14 @@ import (
 	"event-ticketing-system/internal/config"
 	"event-ticketing-system/internal/database"
 	"event-ticketing-system/internal/queue"
-	"event-ticketing-system/internal/redis"
+	appredis "event-ticketing-system/internal/redis"
 	"event-ticketing-system/internal/repository"
 	"event-ticketing-system/internal/routes"
 	"event-ticketing-system/internal/services"
 	"event-ticketing-system/internal/websocket"
 
 	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -33,12 +34,12 @@ func main() {
 	defer database.Close()
 
 	var redisClient *redis.Client
-	redisClient, err = redis.Connect(cfg)
+	redisClient, err = appredis.Connect(cfg)
 	if err != nil {
 		log.Printf("Warning: Failed to connect to Redis: %v. Continuing without caching/rate limiting.", err)
 		redisClient = nil
 	} else {
-		defer redis.Close()
+		defer appredis.Close()
 		log.Println("Redis connected successfully")
 	}
 

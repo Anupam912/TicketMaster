@@ -80,3 +80,7 @@ tmp/
 # Debug
 debug
 __debug_bin
+
+
+#Ignore cursor AI rules
+.cursor/rules/codacy.mdc

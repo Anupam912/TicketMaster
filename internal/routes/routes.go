@@ -13,6 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// SetupRoutes configures all API routes and returns the Gin engine.
 func SetupRoutes(
 	cfg *config.Config,
 	redisClient *redis.Client,
@@ -20,6 +21,10 @@ func SetupRoutes(
 ) *gin.Engine {
 	gin.SetMode(cfg.Server.GinMode)
 	router := gin.Default()
+
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(200, gin.H{"status": "healthy"})
+	})
 
 	userRepo := repository.NewUserRepository()
 	venueRepo := repository.NewVenueRepository()
@@ -45,42 +50,38 @@ func SetupRoutes(
 	rateLimiter := middleware.NewRateLimiter(redisClient, cfg)
 	idempotencyMiddleware := middleware.NewIdempotencyMiddleware(redisClient, cfg)
 
-	api := router.Group("/api"){
-		auth := api.Group("/auth"){
-			auth.POST("/register", authHandler.Register)
-			auth.POST("/login", authHandler.Login)
-		}
+	api := router.Group("/api")
 
-		api.GET("/events", rateLimiter.SimpleRateLimit(), eventHandler.ListEvents)
-		api.GET("/events/:id", rateLimiter.SimpleRateLimit(), eventHandler.GetEvent)
-	}
+	auth := api.Group("/auth")
+	auth.POST("/register", authHandler.Register)
+	auth.POST("/login", authHandler.Login)
+
+	api.GET("/events", rateLimiter.SimpleRateLimit(), eventHandler.ListEvents)
+	api.GET("/events/:id", rateLimiter.SimpleRateLimit(), eventHandler.GetEvent)
 
 	protected := api.Group("")
 	protected.Use(authMiddleware.RequireAuth())
-	protected.Use(rateLimiter.SimpleRateLimit()){
-		protected.GET("/auth/me", authHandler.GetMe)
+	protected.Use(rateLimiter.SimpleRateLimit())
 
-		venues := protected.Group("/venues")
-		venues.Use(authMiddleware.RequireAdmin()){
-			venues.POST("", venueHandler.CreateVenue)
-			venues.GET("", venueHandler.ListVenues)
-			venues.GET("/:id", venueHandler.GetVenue)
-		}
+	protected.GET("/auth/me", authHandler.GetMe)
 
-		events := protected.Group("/events"){
-			events.POST("", authMiddleware.RequireAdmin(), eventHandler.CreateEvent)
-		}
+	venues := protected.Group("/venues")
+	venues.Use(authMiddleware.RequireAdmin())
+	venues.POST("", venueHandler.CreateVenue)
+	venues.GET("", venueHandler.ListVenues)
+	venues.GET("/:id", venueHandler.GetVenue)
 
-		bookings := protected.Group("/bookings"){
-			bookings.POST("/reserve", rateLimiter.VirtualWaitingRoom(5, 60), bookingHandler.ReserveSeat)
-			bookings.POST("/bulk-reserve", bookingHandler.BulkReserve)
-			bookings.POST("/purchase", idempotencyMiddleware.IdempotencyKey(), bookingHandler.PurchaseBooking)
-			bookings.GET("/my-bookings", bookingHandler.GetMyBookings)
-			bookings.DELETE("/:id", bookingHandler.CancelBooking)
-		}
+	events := protected.Group("/events")
+	events.POST("", authMiddleware.RequireAdmin(), eventHandler.CreateEvent)
 
-		protected.GET("/ws", wsHandler.HandleWebSocket)
-	}
+	bookings := protected.Group("/bookings")
+	bookings.POST("/reserve", rateLimiter.VirtualWaitingRoom(5, 60), bookingHandler.ReserveSeat)
+	bookings.POST("/bulk-reserve", bookingHandler.BulkReserve)
+	bookings.POST("/purchase", idempotencyMiddleware.IdempotencyKey(), bookingHandler.PurchaseBooking)
+	bookings.GET("/my-bookings", bookingHandler.GetMyBookings)
+	bookings.DELETE("/:id", bookingHandler.CancelBooking)
+
+	protected.GET("/ws", wsHandler.HandleWebSocket)
 
 	return router
 }

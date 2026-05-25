@@ -8,7 +8,6 @@ import (
 	"event-ticketing-system/internal/services"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 type AuthHandler struct {
