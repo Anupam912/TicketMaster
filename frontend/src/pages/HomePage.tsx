@@ -4,25 +4,37 @@
 
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Calendar, MapPin, Shield, ArrowRight } from 'lucide-react';
-import { Button, Card, CardContent } from '@/components/ui';
+import { Calendar, MapPin, Shield, Zap } from 'lucide-react';
 import { getEvents } from '@/services/events';
 import type { Event } from '@/types';
 import styles from './HomePage.module.css';
 
 export function HomePage() {
-  // Fetch events using TanStack Query
-  // useQuery handles loading, caching, and error states automatically
   const { data: events, isLoading, error } = useQuery({
-    queryKey: ['events'],  // Unique key for caching
-    queryFn: getEvents,    // Function to fetch data
+    queryKey: ['events'],
+    queryFn: getEvents,
   });
+
+  const formatDate = (dateString: string): string => {
+    return new Date(dateString).toLocaleDateString('en-US', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+    });
+  };
+
+  const formatPrice = (price: number): string => {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+    }).format(price);
+  };
 
   return (
     <div>
       {/* Hero Section */}
       <section className={styles.hero}>
-        <div className={styles.heroContainer}>
+        <div className={styles.heroContent}>
           <h1 className={styles.heroTitle}>
             Find & Book Amazing Events
           </h1>
@@ -31,15 +43,11 @@ export function HomePage() {
             Secure your tickets with our fast and reliable booking system.
           </p>
           <div className={styles.heroButtons}>
-            <Link to="/events">
-              <Button variant="secondary" size="lg">
-                Browse Events
-              </Button>
+            <Link to="/events" className={styles.heroButtonPrimary}>
+              Browse Events
             </Link>
-            <Link to="/register">
-              <Button variant="secondary" size="lg">
-                Create Account
-              </Button>
+            <Link to="/register" className={styles.heroButtonSecondary}>
+              Create Account
             </Link>
           </div>
         </div>
@@ -67,11 +75,11 @@ export function HomePage() {
               </p>
             </div>
             <div className={styles.featureCard}>
-              <MapPin className={styles.featureIcon} />
-              <h3 className={styles.featureTitle}>Choose Your Seat</h3>
+              <Zap className={styles.featureIcon} />
+              <h3 className={styles.featureTitle}>Instant Confirmation</h3>
               <p className={styles.featureDescription}>
-                Select your preferred seats with our interactive 
-                seat selection system.
+                Get your tickets confirmed instantly with real-time 
+                seat availability.
               </p>
             </div>
           </div>
@@ -79,80 +87,69 @@ export function HomePage() {
       </section>
 
       {/* Featured Events Section */}
-      <section className={styles.eventsSection}>
-        <div className={styles.featuresContainer}>
-          <div className={styles.eventsHeader}>
+      <section className={styles.events}>
+        <div className={styles.eventsContainer}>
+          <div className={styles.sectionHeader}>
             <h2 className={styles.sectionTitle}>Upcoming Events</h2>
             <Link to="/events" className={styles.viewAllLink}>
-              View All <ArrowRight size={16} />
+              View All →
             </Link>
           </div>
 
           {isLoading && (
-            <p className={styles.loadingText}>Loading events...</p>
+            <div className={styles.loading}>
+              <div className={styles.spinner} />
+              <p>Loading events...</p>
+            </div>
           )}
 
           {error && (
-            <p className={styles.errorText}>
-              Failed to load events. Please try again later.
-            </p>
+            <div className={styles.error}>
+              <p>Failed to load events. Please try again later.</p>
+            </div>
           )}
 
-          {events && (
+          {events && events.length > 0 ? (
             <div className={styles.eventsGrid}>
-              {events.slice(0, 6).map((event) => (
-                <EventCard key={event.id} event={event} />
+              {events.slice(0, 6).map((event: Event) => (
+                <Link 
+                  key={event.id} 
+                  to={`/events/${event.id}`} 
+                  className={styles.eventCardLink}
+                >
+                  <article className={styles.eventCard}>
+                    <div className={styles.eventImage}>
+                      <span className={styles.eventEmoji}>🎫</span>
+                    </div>
+                    <div className={styles.eventContent}>
+                      <h3 className={styles.eventTitle}>{event.title}</h3>
+                      <div className={styles.eventMeta}>
+                        <div className={styles.eventMetaItem}>
+                          <Calendar className={styles.eventMetaIcon} />
+                          <span>{formatDate(event.event_date)}</span>
+                        </div>
+                        {event.venue && (
+                          <div className={styles.eventMetaItem}>
+                            <MapPin className={styles.eventMetaIcon} />
+                            <span>{event.venue.name}</span>
+                          </div>
+                        )}
+                      </div>
+                      <div className={styles.eventPrice}>
+                        {formatPrice(event.ticket_price)}
+                      </div>
+                    </div>
+                  </article>
+                </Link>
               ))}
+            </div>
+          ) : !isLoading && (
+            <div className={styles.emptyState}>
+              <p>No events available at the moment. Check back soon!</p>
             </div>
           )}
         </div>
       </section>
     </div>
-  );
-}
-
-// Event Card Component
-interface EventCardProps {
-  event: Event;
-}
-
-function EventCard({ event }: EventCardProps) {
-  const eventDate = new Date(event.event_date);
-  const formattedDate = eventDate.toLocaleDateString('en-US', {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-  });
-  const formattedTime = eventDate.toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-  });
-
-  return (
-    <Link to={`/events/${event.id}`} className={styles.eventCard}>
-      <Card>
-        <CardContent>
-          <p className={styles.eventDate}>
-            {formattedDate} • {formattedTime}
-          </p>
-          <h3 className={styles.eventTitle}>
-            {event.title}
-          </h3>
-          <p className={styles.eventDescription}>
-            {event.description}
-          </p>
-          <div className={styles.eventFooter}>
-            <span className={styles.eventPrice}>
-              ${event.ticket_price.toFixed(2)}
-            </span>
-            <span className={event.available_seats > 0 ? styles.seatsAvailable : styles.soldOut}>
-              {event.available_seats > 0 
-                ? `${event.available_seats} seats left` 
-                : 'Sold out'}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
-    </Link>
   );
 }

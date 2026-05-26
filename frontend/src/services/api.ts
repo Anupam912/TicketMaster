@@ -1,13 +1,18 @@
 /**
  * API Service - Handles all HTTP requests to the backend
+ * 
+ * Uses VITE_API_URL environment variable for production deployments.
+ * Falls back to '/api' for local development (proxied by Vite).
  */
 
 import axios from 'axios';
 import type { AxiosError, InternalAxiosRequestConfig } from 'axios';
 import type { ApiError } from '@/types';
 
+const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: API_BASE_URL,
   timeout: 10000,
   headers: {
     'Content-Type': 'application/json',

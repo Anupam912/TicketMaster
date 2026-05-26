@@ -3,168 +3,189 @@
  */
 
 .header {
-  background-color: white;
-  border-bottom: 1px solid #e5e7eb;
+  background-color: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
   position: sticky;
   top: 0;
-  z-index: 50;
+  z-index: 100;
 }
 
 .container {
-  max-width: 80rem;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 0 1rem;
+  padding: 0 var(--spacing-md);
 }
 
 .headerContent {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  height: 4rem;
+  justify-content: space-between;
+  height: 64px;
 }
 
 /* Logo */
 .logo {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  color: #6366f1;
+  gap: var(--spacing-sm);
+  font-weight: 700;
+  font-size: var(--font-size-xl);
+  color: var(--color-text);
   text-decoration: none;
-  transition: color 0.2s ease;
 }
 
 .logo:hover {
-  color: #4f46e5;
+  color: var(--color-primary);
 }
 
 .logoIcon {
-  width: 2rem;
-  height: 2rem;
+  width: 28px;
+  height: 28px;
+  color: var(--color-primary);
 }
 
 .logoText {
-  font-size: 1.25rem;
-  font-weight: 700;
+  background: linear-gradient(135deg, var(--color-primary) 0%, #818cf8 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 /* Desktop Navigation */
 .desktopNav {
-  display: none;
+  display: flex;
   align-items: center;
-  gap: 1.5rem;
-}
-
-@media (min-width: 768px) {
-  .desktopNav {
-    display: flex;
-  }
+  gap: var(--spacing-lg);
 }
 
 .navLink {
-  color: #4b5563;
-  text-decoration: none;
+  font-size: var(--font-size-sm);
   font-weight: 500;
-  transition: color 0.2s ease;
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  padding: var(--spacing-sm);
+  border-radius: var(--radius-md);
+  transition: all var(--transition-fast);
 }
 
 .navLink:hover {
-  color: #111827;
+  color: var(--color-text);
+  background-color: var(--color-background);
 }
 
-/* User section */
+/* User Section */
 .userSection {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: var(--spacing-md);
+  padding-left: var(--spacing-md);
+  border-left: 1px solid var(--color-border);
 }
 
 .userInfo {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  color: #374151;
+  gap: var(--spacing-sm);
 }
 
 .userIcon {
-  width: 1.25rem;
-  height: 1.25rem;
+  width: 20px;
+  height: 20px;
+  color: var(--color-text-secondary);
 }
 
 .userName {
+  font-size: var(--font-size-sm);
   font-weight: 500;
+  color: var(--color-text);
 }
 
-/* Auth buttons */
+/* Auth Buttons */
 .authButtons {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: var(--spacing-sm);
 }
 
-/* Mobile menu button */
+/* Mobile Menu Button */
 .mobileMenuButton {
-  display: block;
-  padding: 0.5rem;
-  color: #4b5563;
+  display: none;
+  padding: var(--spacing-sm);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
   background: none;
   border: none;
   cursor: pointer;
 }
 
-@media (min-width: 768px) {
-  .mobileMenuButton {
-    display: none;
-  }
+.mobileMenuButton:hover {
+  background-color: var(--color-background);
+  color: var(--color-text);
 }
 
 .menuIcon {
-  width: 1.5rem;
-  height: 1.5rem;
+  width: 24px;
+  height: 24px;
 }
 
 /* Mobile Navigation */
 .mobileNav {
-  padding: 1rem 0;
-  border-top: 1px solid #f3f4f6;
-}
-
-@media (min-width: 768px) {
-  .mobileNav {
-    display: none;
-  }
+  display: none;
+  padding: var(--spacing-md);
+  border-top: 1px solid var(--color-border);
+  background-color: var(--color-surface);
 }
 
 .mobileNavContent {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: var(--spacing-sm);
 }
 
 .mobileNavLink {
-  color: #4b5563;
-  text-decoration: none;
+  display: block;
+  padding: var(--spacing-md);
+  font-size: var(--font-size-base);
   font-weight: 500;
+  color: var(--color-text);
+  text-decoration: none;
+  border-radius: var(--radius-md);
+  transition: background-color var(--transition-fast);
 }
 
 .mobileNavLink:hover {
-  color: #111827;
+  background-color: var(--color-background);
 }
 
 .mobileUserSection {
-  padding-top: 1rem;
-  border-top: 1px solid #f3f4f6;
+  margin-top: var(--spacing-md);
+  padding-top: var(--spacing-md);
+  border-top: 1px solid var(--color-border);
 }
 
 .mobileUserEmail {
-  font-size: 0.875rem;
-  color: #6b7280;
-  margin-bottom: 0.5rem;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--spacing-md);
 }
 
 .mobileAuthButtons {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  padding-top: 1rem;
-  border-top: 1px solid #f3f4f6;
+  gap: var(--spacing-sm);
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .desktopNav {
+    display: none;
+  }
+
+  .mobileMenuButton {
+    display: flex;
+  }
+
+  .mobileNav {
+    display: block;
+  }
 }

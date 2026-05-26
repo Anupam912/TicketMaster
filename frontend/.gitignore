@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+.vercel
+.netlify
+
+# Environment (keep .env.example)
+.env
+.env.local
+.env.production

@@ -3,37 +3,37 @@
  */
 
 .card {
-  background-color: white;
-  border-radius: 0.75rem;
-  border: 1px solid #e5e7eb;
-  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-sm);
   overflow: hidden;
 }
 
 .header {
-  padding: 1rem 1.5rem;
-  border-bottom: 1px solid #f3f4f6;
+  padding: var(--spacing-lg);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .title {
-  font-size: 1.125rem;
+  font-size: var(--font-size-lg);
   font-weight: 600;
-  color: #111827;
+  color: var(--color-text);
   margin: 0;
 }
 
 .description {
-  font-size: 0.875rem;
-  color: #6b7280;
-  margin-top: 0.25rem;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  margin: var(--spacing-xs) 0 0 0;
 }
 
 .content {
-  padding: 1rem 1.5rem;
+  padding: var(--spacing-lg);
 }
 
 .footer {
-  padding: 1rem 1.5rem;
-  background-color: #f9fafb;
-  border-top: 1px solid #f3f4f6;
+  padding: var(--spacing-lg);
+  border-top: 1px solid var(--color-border);
+  background-color: var(--color-background);
 }

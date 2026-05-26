@@ -1,24 +1,6 @@
 /**
- * App-level styles for placeholder and error pages
+ * App-level styles for error pages
  */
-
-.placeholderPage {
-  padding: 4rem 1rem;
-  text-align: center;
-  max-width: 40rem;
-  margin: 0 auto;
-}
-
-.placeholderTitle {
-  font-size: 2rem;
-  font-weight: 700;
-  margin-bottom: 1rem;
-  color: #111827;
-}
-
-.placeholderText {
-  color: #6b7280;
-}
 
 /* 404 Page */
 .notFoundPage {

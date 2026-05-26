@@ -1,0 +1,266 @@
+/**
+ * My Bookings Page Styles
+ */
+
+.container {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: var(--spacing-xl) var(--spacing-md);
+}
+
+.header {
+  margin-bottom: var(--spacing-xl);
+}
+
+.title {
+  font-size: var(--font-size-3xl);
+  font-weight: 700;
+  color: var(--color-text);
+  margin-bottom: var(--spacing-sm);
+}
+
+.subtitle {
+  font-size: var(--font-size-lg);
+  color: var(--color-text-secondary);
+}
+
+/* Bookings List */
+.bookingsList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.bookingCard {
+  overflow: hidden;
+}
+
+.bookingContent {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--spacing-lg);
+  padding: var(--spacing-lg);
+}
+
+.bookingMain {
+  flex: 1;
+  min-width: 0;
+}
+
+.bookingHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  margin-bottom: var(--spacing-md);
+  flex-wrap: wrap;
+}
+
+.eventTitle {
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+/* Status Badges */
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.statusPending {
+  background-color: #fef3c7;
+  color: #92400e;
+}
+
+.statusConfirmed {
+  background-color: #d1fae5;
+  color: #065f46;
+}
+
+.statusCancelled {
+  background-color: #fee2e2;
+  color: #991b1b;
+}
+
+.statusExpired {
+  background-color: #f3f4f6;
+  color: #6b7280;
+}
+
+/* Booking Meta */
+.bookingMeta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.metaItem {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.metaIcon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.expiryWarning {
+  margin-top: var(--spacing-sm);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  background-color: #fef3c7;
+  color: #92400e;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+  display: inline-block;
+}
+
+/* Actions */
+.bookingActions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--spacing-md);
+  flex-shrink: 0;
+}
+
+.priceSection {
+  text-align: right;
+}
+
+.priceLabel {
+  display: block;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  margin-bottom: 2px;
+}
+
+.price {
+  font-size: var(--font-size-xl);
+  font-weight: 700;
+  color: var(--color-primary);
+}
+
+.actionButtons {
+  display: flex;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* States */
+.loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 400px;
+  gap: var(--spacing-md);
+  color: var(--color-text-secondary);
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.error {
+  text-align: center;
+  padding: var(--spacing-xl);
+}
+
+.error h2 {
+  color: var(--color-danger);
+  margin-bottom: var(--spacing-sm);
+}
+
+.error p {
+  color: var(--color-text-secondary);
+}
+
+.empty {
+  text-align: center;
+  padding: var(--spacing-2xl);
+}
+
+.emptyIcon {
+  width: 64px;
+  height: 64px;
+  color: var(--color-text-muted);
+  margin: 0 auto var(--spacing-md);
+}
+
+.empty h3 {
+  font-size: var(--font-size-xl);
+  color: var(--color-text);
+  margin-bottom: var(--spacing-sm);
+}
+
+.empty p {
+  color: var(--color-text-secondary);
+  margin-bottom: var(--spacing-lg);
+}
+
+.notLoggedIn {
+  text-align: center;
+  padding: var(--spacing-2xl);
+}
+
+.notLoggedInIcon {
+  width: 64px;
+  height: 64px;
+  color: var(--color-primary);
+  margin: 0 auto var(--spacing-md);
+}
+
+.notLoggedIn h2 {
+  font-size: var(--font-size-xl);
+  color: var(--color-text);
+  margin-bottom: var(--spacing-sm);
+}
+
+.notLoggedIn p {
+  color: var(--color-text-secondary);
+  margin-bottom: var(--spacing-lg);
+}
+
+/* Responsive */
+@media (max-width: 640px) {
+  .bookingContent {
+    flex-direction: column;
+  }
+
+  .bookingActions {
+    align-items: flex-start;
+    width: 100%;
+    padding-top: var(--spacing-md);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .priceSection {
+    text-align: left;
+  }
+
+  .actionButtons {
+    justify-content: flex-start;
+    width: 100%;
+  }
+}
