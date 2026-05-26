@@ -1,0 +1,61 @@
+/**
+ * Layout Component Styles
+ */
+
+.layout {
+  min-height: 100vh;
+  background-color: #f9fafb;
+  display: flex;
+  flex-direction: column;
+}
+
+.main {
+  flex: 1;
+}
+
+.footer {
+  background-color: white;
+  border-top: 1px solid #e5e7eb;
+  padding: 2rem 0;
+}
+
+.footerContainer {
+  max-width: 80rem;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+
+.footerContent {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+@media (min-width: 768px) {
+  .footerContent {
+    flex-direction: row;
+  }
+}
+
+.copyright {
+  color: #6b7280;
+  font-size: 0.875rem;
+}
+
+.footerLinks {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.footerLink {
+  color: #6b7280;
+  font-size: 0.875rem;
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+
+.footerLink:hover {
+  color: #374151;
+}
