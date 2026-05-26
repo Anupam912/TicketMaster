@@ -67,10 +67,13 @@ func (w *BookingWorker) processBookingJob(ctx context.Context, job *queue.Bookin
 		SeatNumber: job.SeatNumber,
 	}
 
-	_, err := w.bookingService.ReserveSeat(job.UserID, req)
+	booking, err := w.bookingService.ReserveSeat(job.UserID, req)
 	if err != nil {
+		_ = w.queue.FailJob(ctx, job.ID, err.Error())
 		return fmt.Errorf("failed to reserve seat: %w", err)
 	}
+
+	_ = w.queue.CompleteJob(ctx, job.ID, booking.ID)
 
 	if w.hub != nil {
 		seatRepo := repository.NewSeatRepository()
@@ -80,7 +83,7 @@ func (w *BookingWorker) processBookingJob(ctx context.Context, job *queue.Bookin
 		}
 	}
 
-	log.Printf("Successfully processed booking job %s for user %s", job.ID, job.UserID)
+	log.Printf("Successfully processed booking job %s for user %s, booking %s", job.ID, job.UserID, booking.ID)
 	return nil
 }
 
@@ -132,8 +135,11 @@ func (w *PurchaseWorker) StartPurchaseWorker(ctx context.Context) {
 func (w *PurchaseWorker) processPurchaseJob(ctx context.Context, job *queue.PurchaseJob) error {
 	booking, err := w.bookingService.PurchaseBooking(job.UserID, job.BookingID)
 	if err != nil {
+		_ = w.queue.FailJob(ctx, job.ID, err.Error())
 		return fmt.Errorf("failed to purchase booking: %w", err)
 	}
+
+	_ = w.queue.CompleteJob(ctx, job.ID, booking.ID)
 
 	if w.hub != nil {
 		w.hub.BroadcastSeatUpdate(booking.EventID, booking.SeatID, "sold")

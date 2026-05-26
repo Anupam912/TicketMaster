@@ -5,22 +5,12 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
+    env_file:
+      - .env
     environment:
-      - PORT=8080
-      - GIN_MODE=release
+      # Override for Docker networking
       - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_USER=postgres
-      - DB_PASSWORD=postgres
-      - DB_NAME=event_ticketing
-      - DB_SSLMODE=disable
       - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=
-      - REDIS_DB=0
-      - JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
-      - JWT_EXPIRY_HOURS=24
-      - RESERVATION_TIMEOUT_MINUTES=10
     depends_on:
       postgres:
         condition: service_healthy
@@ -41,13 +31,11 @@ services:
       context: .
       dockerfile: Dockerfile
     command: ["./migrate"]
+    env_file:
+      - .env
     environment:
+      # Override for Docker networking
       - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_USER=postgres
-      - DB_PASSWORD=postgres
-      - DB_NAME=event_ticketing
-      - DB_SSLMODE=disable
     depends_on:
       postgres:
         condition: service_healthy

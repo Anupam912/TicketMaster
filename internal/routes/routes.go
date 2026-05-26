@@ -11,6 +11,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
 )
 
 // SetupRoutes configures all API routes and returns the Gin engine.
@@ -26,6 +28,10 @@ func SetupRoutes(
 		c.JSON(200, gin.H{"status": "healthy"})
 	})
 
+	swaggerHandler := handlers.NewSwaggerHandler()
+	router.GET("/docs", swaggerHandler.ServeSwaggerUI)
+	router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+
 	userRepo := repository.NewUserRepository()
 	venueRepo := repository.NewVenueRepository()
 	eventRepo := repository.NewEventRepository()
@@ -38,7 +44,10 @@ func SetupRoutes(
 	authService := services.NewAuthService(userRepo, cfg)
 	venueService := services.NewVenueService(venueRepo)
 	eventService := services.NewEventService(eventRepo, venueRepo, seatRepo, redisClient, cfg)
-	bookingService := services.NewBookingService(bookingRepo, eventRepo, seatRepo, cfg, expiryQueue)
+	paymentService := services.NewPaymentService(cfg)
+	bookingService := services.NewBookingService(bookingRepo, eventRepo, seatRepo, cfg, expiryQueue, paymentService)
+
+	bookingService.SetCacheInvalidator(eventService.InvalidateEventCache)
 
 	authHandler := handlers.NewAuthHandler(authService)
 	venueHandler := handlers.NewVenueHandler(venueService)
@@ -58,12 +67,19 @@ func SetupRoutes(
 
 	api.GET("/events", rateLimiter.SimpleRateLimit(), eventHandler.ListEvents)
 	api.GET("/events/:id", rateLimiter.SimpleRateLimit(), eventHandler.GetEvent)
+	api.GET("/events/:id/seats", rateLimiter.SimpleRateLimit(), eventHandler.GetEventSeats)
 
 	protected := api.Group("")
 	protected.Use(authMiddleware.RequireAuth())
 	protected.Use(rateLimiter.SimpleRateLimit())
 
 	protected.GET("/auth/me", authHandler.GetMe)
+
+	admin := protected.Group("/admin")
+	admin.Use(authMiddleware.RequireAdmin())
+	admin.GET("/users", authHandler.ListUsers)
+	admin.POST("/users/:id/promote", authHandler.PromoteToAdmin)
+	admin.POST("/users/:id/demote", authHandler.DemoteToUser)
 
 	venues := protected.Group("/venues")
 	venues.Use(authMiddleware.RequireAdmin())
@@ -75,10 +91,13 @@ func SetupRoutes(
 	events.POST("", authMiddleware.RequireAdmin(), eventHandler.CreateEvent)
 
 	bookings := protected.Group("/bookings")
-	bookings.POST("/reserve", rateLimiter.VirtualWaitingRoom(5, 60), bookingHandler.ReserveSeat)
+	// VirtualWaitingRoom: 100 requests per 60 seconds per IP (increased for load testing)
+	bookings.POST("/reserve", rateLimiter.VirtualWaitingRoom(100, 60), bookingHandler.ReserveSeat)
 	bookings.POST("/bulk-reserve", bookingHandler.BulkReserve)
 	bookings.POST("/purchase", idempotencyMiddleware.IdempotencyKey(), bookingHandler.PurchaseBooking)
 	bookings.GET("/my-bookings", bookingHandler.GetMyBookings)
+	bookings.GET("/job/:job_id", bookingHandler.GetJobStatus)
+	bookings.GET("/:id", bookingHandler.GetBooking)
 	bookings.DELETE("/:id", bookingHandler.CancelBooking)
 
 	protected.GET("/ws", wsHandler.HandleWebSocket)

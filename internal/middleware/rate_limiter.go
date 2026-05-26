@@ -97,7 +97,8 @@ func (rl *RateLimiter) SimpleRateLimit() gin.HandlerFunc {
 		clientIP := c.ClientIP()
 
 		if rl.redis != nil {
-			allowed, err := rl.checkRedisSimpleLimit(c.Request.Context(), clientIP, 100, time.Minute)
+			// Higher limit (1000/min) to support load testing while still providing protection
+			allowed, err := rl.checkRedisSimpleLimit(c.Request.Context(), clientIP, 1000, time.Minute)
 			if err == nil {
 				if !allowed {
 					c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})

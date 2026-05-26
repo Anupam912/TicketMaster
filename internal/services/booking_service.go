@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -15,59 +16,100 @@ import (
 	"github.com/google/uuid"
 )
 
+// Configuration constants.
+const (
+	maxBulkSeats  = 500
+	bulkChunkSize = 50
+)
+
+// Sentinel errors for booking service operations.
+var (
+	ErrBookingNotFound    = errors.New("booking not found")
+	ErrNoAvailableSeats   = errors.New("no available seats")
+	ErrSeatBeingBooked    = errors.New("seat is currently being booked by another user")
+	ErrSeatNotAvailable   = errors.New("seat is not available")
+	ErrUnauthorized       = errors.New("unauthorized")
+	ErrNotReserved        = errors.New("booking is not in reserved status")
+	ErrBookingExpired     = errors.New("booking has expired")
+	ErrOnlyReservedCancel = errors.New("only reserved bookings can be cancelled")
+	ErrNoSeatsRequested   = errors.New("no seats requested")
+	ErrTooManySeats       = errors.New("maximum 500 seats per bulk request")
+)
+
+// CacheInvalidator is a callback function type for invalidating event cache.
+type CacheInvalidator func(eventID uuid.UUID)
+
+// BookingService handles booking-related business logic.
 type BookingService struct {
-	bookingRepo  *repository.BookingRepository
-	eventRepo    *repository.EventRepository
-	seatRepo     *repository.SeatRepository
-	config       *config.Config
-	expiryQueue  *queue.ExpiryQueue
+	bookingRepo      *repository.BookingRepository
+	eventRepo        *repository.EventRepository
+	seatRepo         *repository.SeatRepository
+	config           *config.Config
+	expiryQueue      *queue.ExpiryQueue
+	cacheInvalidator CacheInvalidator
+	paymentService   *PaymentService
 }
 
+// NewBookingService creates a new BookingService instance.
 func NewBookingService(
 	bookingRepo *repository.BookingRepository,
 	eventRepo *repository.EventRepository,
 	seatRepo *repository.SeatRepository,
 	cfg *config.Config,
 	expiryQueue *queue.ExpiryQueue,
+	paymentService *PaymentService,
 ) *BookingService {
 	return &BookingService{
-		bookingRepo:  bookingRepo,
-		eventRepo:    eventRepo,
-		seatRepo:     seatRepo,
-		config:       cfg,
-		expiryQueue:  expiryQueue,
+		bookingRepo:    bookingRepo,
+		eventRepo:      eventRepo,
+		seatRepo:       seatRepo,
+		config:         cfg,
+		expiryQueue:    expiryQueue,
+		paymentService: paymentService,
 	}
 }
 
+// SetCacheInvalidator sets the function to call when event cache needs invalidation.
+func (s *BookingService) SetCacheInvalidator(invalidator CacheInvalidator) {
+	s.cacheInvalidator = invalidator
+}
+
+func (s *BookingService) invalidateCache(eventID uuid.UUID) {
+	if s.cacheInvalidator != nil {
+		s.cacheInvalidator(eventID)
+	}
+}
+
+// ReserveSeat reserves a specific seat for a user with a time-limited hold.
 func (s *BookingService) ReserveSeat(userID uuid.UUID, req *models.ReserveSeatRequest) (*models.Booking, error) {
 	event, err := s.eventRepo.FindByID(req.EventID)
 	if err != nil {
-		if err == repository.ErrEventNotFound {
-			return nil, errors.New("event not found")
+		if errors.Is(err, repository.ErrEventNotFound) {
+			return nil, repository.ErrEventNotFound
 		}
-		return nil, err
+		return nil, fmt.Errorf("find event: %w", err)
 	}
 
 	if event.AvailableSeats <= 0 {
-		return nil, errors.New("no available seats")
+		return nil, ErrNoAvailableSeats
 	}
 
 	expiresAt := time.Now().Add(s.config.Booking.ReservationTimeout())
 
 	seat, err := s.seatRepo.ReserveSeatWithLock(req.EventID, req.SeatNumber, expiresAt)
 	if err != nil {
-		if err == repository.ErrSeatAlreadyBooked {
-			return nil, errors.New("seat is currently being booked by another user")
+		if errors.Is(err, repository.ErrSeatAlreadyBooked) {
+			return nil, ErrSeatBeingBooked
 		}
-		if err == repository.ErrSeatNotAvailable {
-			return nil, errors.New("seat is not available")
+		if errors.Is(err, repository.ErrSeatNotAvailable) {
+			return nil, ErrSeatNotAvailable
 		}
-		return nil, err
+		return nil, fmt.Errorf("reserve seat with lock: %w", err)
 	}
 
 	if err := s.eventRepo.DecrementAvailableSeats(req.EventID); err != nil {
-		s.seatRepo.ReleaseSeat(seat.ID)
-		return nil, errors.New("failed to update available seats")
+		_ = s.seatRepo.ReleaseSeat(seat.ID)
+		return nil, fmt.Errorf("decrement available seats: %w", err)
 	}
 
 	booking := &models.Booking{
@@ -81,38 +123,41 @@ func (s *BookingService) ReserveSeat(userID uuid.UUID, req *models.ReserveSeatRe
 	}
 
 	if err := s.bookingRepo.Create(booking); err != nil {
-		s.seatRepo.ReleaseSeat(seat.ID)
-		s.eventRepo.IncrementAvailableSeats(req.EventID)
-		return nil, err
+		_ = s.seatRepo.ReleaseSeat(seat.ID)
+		_ = s.eventRepo.IncrementAvailableSeats(req.EventID)
+		return nil, fmt.Errorf("create booking: %w", err)
 	}
 
 	if s.expiryQueue != nil {
 		_ = s.expiryQueue.Add(context.Background(), booking.ID.String(), booking.ExpiresAt)
 	}
 
+	s.invalidateCache(req.EventID)
+
 	return booking, nil
 }
 
-func (s *BookingService) PurchaseBooking(userID uuid.UUID, bookingID uuid.UUID) (*models.Booking, error) {
+// PurchaseBooking completes the purchase of a reserved booking.
+func (s *BookingService) PurchaseBooking(userID, bookingID uuid.UUID) (*models.Booking, error) {
 	booking, err := s.bookingRepo.FindByID(bookingID)
 	if err != nil {
-		if err == repository.ErrBookingNotFound {
-			return nil, errors.New("booking not found")
+		if errors.Is(err, repository.ErrBookingNotFound) {
+			return nil, ErrBookingNotFound
 		}
-		return nil, err
+		return nil, fmt.Errorf("find booking: %w", err)
 	}
 
 	if booking.UserID != userID {
-		return nil, errors.New("unauthorized")
+		return nil, ErrUnauthorized
 	}
 
 	if booking.Status != models.BookingStatusReserved {
-		return nil, errors.New("booking is not in reserved status")
+		return nil, ErrNotReserved
 	}
 
 	if time.Now().After(booking.ExpiresAt) {
-		s.ReleaseExpiredBooking(booking)
-		return nil, errors.New("booking has expired")
+		_ = s.ReleaseExpiredBooking(booking)
+		return nil, ErrBookingExpired
 	}
 
 	if err := s.processPayment(booking); err != nil {
@@ -120,7 +165,7 @@ func (s *BookingService) PurchaseBooking(userID uuid.UUID, bookingID uuid.UUID) 
 	}
 
 	if err := s.bookingRepo.UpdateStatus(bookingID, models.BookingStatusPurchased); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("update booking status: %w", err)
 	}
 
 	if s.expiryQueue != nil {
@@ -128,70 +173,73 @@ func (s *BookingService) PurchaseBooking(userID uuid.UUID, bookingID uuid.UUID) 
 	}
 
 	if err := s.seatRepo.MarkAsSold(booking.SeatID); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mark seat as sold: %w", err)
 	}
 
 	booking, err = s.bookingRepo.FindByID(bookingID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetch updated booking: %w", err)
 	}
 
 	return booking, nil
 }
 
+// ReleaseExpiredBookingByID releases a booking by ID if it's expired and still reserved.
 func (s *BookingService) ReleaseExpiredBookingByID(ctx context.Context, bookingID uuid.UUID) error {
 	booking, err := s.bookingRepo.FindByID(bookingID)
 	if err != nil {
-		if err == repository.ErrBookingNotFound {
+		if errors.Is(err, repository.ErrBookingNotFound) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("find booking: %w", err)
 	}
+
 	if booking.Status != models.BookingStatusReserved {
 		return nil
 	}
+
 	return s.ReleaseExpiredBooking(booking)
 }
 
+// ReleaseExpiredBooking releases an expired booking, freeing the seat and updating counts.
 func (s *BookingService) ReleaseExpiredBooking(booking *models.Booking) error {
 	if err := s.bookingRepo.UpdateStatus(booking.ID, models.BookingStatusExpired); err != nil {
-		return err
+		return fmt.Errorf("update booking status: %w", err)
 	}
 
 	if err := s.seatRepo.ReleaseSeat(booking.SeatID); err != nil {
-		return err
+		return fmt.Errorf("release seat: %w", err)
 	}
 
 	if err := s.eventRepo.IncrementAvailableSeats(booking.EventID); err != nil {
-		return err
+		return fmt.Errorf("increment available seats: %w", err)
 	}
+
+	s.invalidateCache(booking.EventID)
 
 	return nil
 }
 
+// BulkReserve reserves multiple seats for a user in a single operation.
+// Seats are processed in parallel chunks. If any reservation fails, all
+// successful reservations are rolled back.
 func (s *BookingService) BulkReserve(userID uuid.UUID, req *models.BulkReserveRequest) ([]*models.Booking, error) {
-	const chunkSize = 50
 	seats := req.SeatNumbers
 	if len(seats) == 0 {
-		return nil, errors.New("no seats requested")
+		return nil, ErrNoSeatsRequested
 	}
-	if len(seats) > 500 {
-		return nil, errors.New("maximum 500 seats per bulk request")
-	}
-
-	var chunks [][]string
-	for i := 0; i < len(seats); i += chunkSize {
-		end := i + chunkSize
-		if end > len(seats) {
-			end = len(seats)
-		}
-		chunks = append(chunks, seats[i:end])
+	if len(seats) > maxBulkSeats {
+		return nil, ErrTooManySeats
 	}
 
-	var mu sync.Mutex
-	var successful []*models.Booking
-	var firstErr error
-	var wg sync.WaitGroup
+	chunks := s.chunkSeats(seats, bulkChunkSize)
+
+	var (
+		mu         sync.Mutex
+		successful []*models.Booking
+		firstErr   error
+		wg         sync.WaitGroup
+	)
 
 	for _, chunk := range chunks {
 		wg.Add(1)
@@ -227,56 +275,102 @@ func (s *BookingService) BulkReserve(userID uuid.UUID, req *models.BulkReserveRe
 	return successful, nil
 }
 
-func (s *BookingService) GetUserBookings(userID uuid.UUID) ([]*models.BookingWithDetails, error) {
-	return s.bookingRepo.FindByUserID(userID)
+func (s *BookingService) chunkSeats(seats []string, size int) [][]string {
+	chunks := make([][]string, 0, (len(seats)+size-1)/size)
+	for i := 0; i < len(seats); i += size {
+		end := i + size
+		if end > len(seats) {
+			end = len(seats)
+		}
+		chunks = append(chunks, seats[i:end])
+	}
+	return chunks
 }
 
-func (s *BookingService) CancelBooking(userID uuid.UUID, bookingID uuid.UUID) error {
+// GetUserBookings retrieves all bookings for a specific user.
+func (s *BookingService) GetUserBookings(userID uuid.UUID) ([]*models.BookingWithDetails, error) {
+	bookings, err := s.bookingRepo.FindByUserID(userID)
+	if err != nil {
+		return nil, fmt.Errorf("find user bookings: %w", err)
+	}
+	return bookings, nil
+}
+
+// GetBookingByID retrieves a booking by ID, verifying the requesting user owns it.
+func (s *BookingService) GetBookingByID(userID, bookingID uuid.UUID) (*models.Booking, error) {
 	booking, err := s.bookingRepo.FindByID(bookingID)
 	if err != nil {
-		if err == repository.ErrBookingNotFound {
-			return errors.New("booking not found")
+		if errors.Is(err, repository.ErrBookingNotFound) {
+			return nil, ErrBookingNotFound
 		}
-		return err
+		return nil, fmt.Errorf("find booking: %w", err)
 	}
 
 	if booking.UserID != userID {
-		return errors.New("unauthorized")
+		return nil, ErrUnauthorized
+	}
+
+	return booking, nil
+}
+
+// CancelBooking cancels a reserved booking and releases the seat.
+func (s *BookingService) CancelBooking(userID, bookingID uuid.UUID) error {
+	booking, err := s.bookingRepo.FindByID(bookingID)
+	if err != nil {
+		if errors.Is(err, repository.ErrBookingNotFound) {
+			return ErrBookingNotFound
+		}
+		return fmt.Errorf("find booking: %w", err)
+	}
+
+	if booking.UserID != userID {
+		return ErrUnauthorized
 	}
 
 	if booking.Status != models.BookingStatusReserved {
-		return errors.New("only reserved bookings can be cancelled")
+		return ErrOnlyReservedCancel
 	}
 
 	if err := s.bookingRepo.UpdateStatus(bookingID, models.BookingStatusCancelled); err != nil {
-		return err
+		return fmt.Errorf("update booking status: %w", err)
 	}
 
 	if err := s.seatRepo.ReleaseSeat(booking.SeatID); err != nil {
-		return err
+		return fmt.Errorf("release seat: %w", err)
 	}
 
 	if err := s.eventRepo.IncrementAvailableSeats(booking.EventID); err != nil {
-		return err
+		return fmt.Errorf("increment available seats: %w", err)
 	}
+
+	s.invalidateCache(booking.EventID)
 
 	return nil
 }
 
 func (s *BookingService) processPayment(booking *models.Booking) error {
-	time.Sleep(100 * time.Millisecond)
+	if s.paymentService == nil {
+		return nil
+	}
+
+	_, err := s.paymentService.ProcessPayment(context.Background(), booking)
+	if err != nil {
+		return fmt.Errorf("process payment: %w", err)
+	}
+
 	return nil
 }
 
+// CleanupExpiredReservations finds and releases all expired reservations.
 func (s *BookingService) CleanupExpiredReservations(ctx context.Context) error {
 	expiredBookings, err := s.bookingRepo.FindExpiredReservations()
 	if err != nil {
-		return err
+		return fmt.Errorf("find expired reservations: %w", err)
 	}
 
 	for _, booking := range expiredBookings {
 		if err := s.ReleaseExpiredBooking(booking); err != nil {
-			fmt.Printf("Error releasing expired booking %s: %v\n", booking.ID, err)
+			log.Printf("Error releasing expired booking %s: %v", booking.ID, err)
 		}
 	}
 

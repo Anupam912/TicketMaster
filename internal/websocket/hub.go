@@ -6,10 +6,13 @@ import (
 	"net/http"
 	"sync"
 
+	"event-ticketing-system/internal/config"
+
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
+// Client represents a WebSocket client.
 type Client struct {
 	ID       uuid.UUID
 	Conn     *websocket.Conn
@@ -18,14 +21,18 @@ type Client struct {
 	EventIDs map[uuid.UUID]bool
 }
 
+// Hub maintains active WebSocket clients and broadcasts messages.
 type Hub struct {
-	Clients map[*Client]bool
-	Broadcast chan *Message
-	Register chan *Client
-	Unregister chan *Client
-	mu sync.RWMutex
+	Clients        map[*Client]bool
+	Broadcast      chan *Message
+	Register       chan *Client
+	Unregister     chan *Client
+	mu             sync.RWMutex
+	allowedOrigins []string
+	Upgrader       websocket.Upgrader
 }
 
+// Message represents a WebSocket message.
 type Message struct {
 	Type    string      `json:"type"`
 	EventID uuid.UUID   `json:"event_id,omitempty"`
@@ -33,21 +40,52 @@ type Message struct {
 	Data    interface{} `json:"data,omitempty"`
 }
 
-var Upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
+// NewHub creates a new Hub with configurable CORS.
+func NewHub() *Hub {
+	return NewHubWithConfig(nil)
 }
 
-func NewHub() *Hub {
-	return &Hub{
+// NewHubWithConfig creates a new Hub with the given configuration.
+func NewHubWithConfig(cfg *config.Config) *Hub {
+	h := &Hub{
 		Clients:    make(map[*Client]bool),
 		Broadcast:  make(chan *Message),
 		Register:   make(chan *Client),
 		Unregister: make(chan *Client),
 	}
+
+	if cfg != nil {
+		h.allowedOrigins = cfg.WebSocket.AllowedOrigins
+	}
+
+	h.Upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin:     h.checkOrigin,
+	}
+
+	return h
+}
+
+// checkOrigin validates the request origin against allowed origins.
+func (h *Hub) checkOrigin(r *http.Request) bool {
+	if len(h.allowedOrigins) == 0 {
+		return true
+	}
+
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+
+	for _, allowed := range h.allowedOrigins {
+		if allowed == "*" || allowed == origin {
+			return true
+		}
+	}
+
+	log.Printf("WebSocket connection rejected: origin %s not allowed", origin)
+	return false
 }
 
 func (h *Hub) Run() {

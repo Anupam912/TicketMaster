@@ -4,17 +4,20 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
 )
 
 type Config struct {
-	Server   ServerConfig
-	Database DatabaseConfig
-	Redis    RedisConfig
-	JWT      JWTConfig
-	Booking  BookingConfig
+	Server    ServerConfig
+	Database  DatabaseConfig
+	Redis     RedisConfig
+	JWT       JWTConfig
+	Booking   BookingConfig
+	WebSocket WebSocketConfig
+	Stripe    StripeConfig
 }
 
 type ServerConfig struct {
@@ -91,6 +94,38 @@ func (b BookingConfig) ReservationTimeout() time.Duration {
 	return time.Duration(b.ReservationTimeoutMinutes) * time.Minute
 }
 
+// WebSocketConfig holds WebSocket configuration.
+type WebSocketConfig struct {
+	AllowedOrigins []string
+}
+
+// IsOriginAllowed checks if an origin is allowed for WebSocket connections.
+func (w WebSocketConfig) IsOriginAllowed(origin string) bool {
+	if len(w.AllowedOrigins) == 0 {
+		return true
+	}
+	for _, allowed := range w.AllowedOrigins {
+		if allowed == "*" || allowed == origin {
+			return true
+		}
+	}
+	return false
+}
+
+// StripeConfig holds Stripe payment gateway configuration.
+type StripeConfig struct {
+	SecretKey      string
+	PublishableKey string
+	WebhookSecret  string
+	WebhookURL     string
+	Currency       string
+}
+
+// IsConfigured returns true if Stripe is properly configured.
+func (s StripeConfig) IsConfigured() bool {
+	return s.SecretKey != ""
+}
+
 func Load() (*Config, error) {
 	_ = godotenv.Load()
 
@@ -124,9 +159,34 @@ func Load() (*Config, error) {
 		Booking: BookingConfig{
 			ReservationTimeoutMinutes: getEnvAsInt("RESERVATION_TIMEOUT_MINUTES", 10),
 		},
+		WebSocket: WebSocketConfig{
+			AllowedOrigins: getEnvAsStringSlice("WEBSOCKET_ALLOWED_ORIGINS", []string{}),
+		},
+		Stripe: StripeConfig{
+			SecretKey:      getEnv("STRIPE_SECRET_KEY", ""),
+			PublishableKey: getEnv("STRIPE_PUBLISHABLE_KEY", ""),
+			WebhookSecret:  getEnv("STRIPE_WEBHOOK_SECRET", ""),
+			WebhookURL:     getEnv("STRIPE_WEBHOOK_URL", "http://localhost:8080/api/webhooks/stripe"),
+			Currency:       getEnv("STRIPE_CURRENCY", "usd"),
+		},
 	}
 
 	return config, nil
+}
+
+func getEnvAsStringSlice(key string, defaultValue []string) []string {
+	valueStr := os.Getenv(key)
+	if valueStr == "" {
+		return defaultValue
+	}
+	var result []string
+	for _, v := range strings.Split(valueStr, ",") {
+		trimmed := strings.TrimSpace(v)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }
 
 func getEnv(key, defaultValue string) string {
