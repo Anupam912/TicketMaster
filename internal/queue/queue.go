@@ -155,7 +155,7 @@ func newKafkaWriter(brokers []string, topic string) *kafkago.Writer {
 		Topic:                  topic,
 		RequiredAcks:           kafkago.RequireOne,
 		AllowAutoTopicCreation: true,
-		Balancer:               &kafkago.LeastBytes{},
+		Balancer:               &kafkago.Hash{},
 	}
 }
 
@@ -189,7 +189,7 @@ func (q *Queue) EnqueueBookingJob(ctx context.Context, job *BookingJob) error {
 		return fmt.Errorf("marshal booking job: %w", err)
 	}
 
-	msg := kafkago.Message{Key: []byte(job.ID.String()), Value: payload, Time: time.Now().UTC()}
+	msg := kafkago.Message{Key: []byte(job.EventID.String()), Value: payload, Time: time.Now().UTC()}
 	if err := q.bookingWriter.WriteMessages(ctx, msg); err != nil {
 		return fmt.Errorf("write booking command: %w", err)
 	}
@@ -356,7 +356,7 @@ func (q *Queue) HandleBookingJobFailure(ctx context.Context, job *BookingJob, er
 		if err != nil {
 			return fmt.Errorf("marshal booking retry: %w", err)
 		}
-		if err := q.bookingWriter.WriteMessages(ctx, kafkago.Message{Key: []byte(job.ID.String()), Value: payload, Time: time.Now().UTC()}); err != nil {
+		if err := q.bookingWriter.WriteMessages(ctx, kafkago.Message{Key: []byte(job.EventID.String()), Value: payload, Time: time.Now().UTC()}); err != nil {
 			return fmt.Errorf("write booking retry: %w", err)
 		}
 		q.bumpCounter(ctx, bookingDepthKey, 1)
@@ -371,7 +371,7 @@ func (q *Queue) HandleBookingJobFailure(ctx context.Context, job *BookingJob, er
 	if err != nil {
 		return fmt.Errorf("marshal booking dlq: %w", err)
 	}
-	if err := q.bookingDLQW.WriteMessages(ctx, kafkago.Message{Key: []byte(job.ID.String()), Value: payload, Time: time.Now().UTC()}); err != nil {
+	if err := q.bookingDLQW.WriteMessages(ctx, kafkago.Message{Key: []byte(job.EventID.String()), Value: payload, Time: time.Now().UTC()}); err != nil {
 		return fmt.Errorf("write booking dlq: %w", err)
 	}
 	q.bumpCounter(ctx, bookingDLQKey, 1)

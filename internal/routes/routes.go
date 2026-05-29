@@ -106,8 +106,15 @@ func SetupRoutes(
 	events.POST("", authMiddleware.RequireAdmin(), eventHandler.CreateEvent)
 
 	bookings := protected.Group("/bookings")
-	// VirtualWaitingRoom: 100 requests per 60 seconds per IP (increased for load testing)
-	bookings.POST("/reserve", rateLimiter.VirtualWaitingRoom(100, 60), bookingHandler.ReserveSeat)
+	bookings.POST(
+		"/reserve",
+		rateLimiter.EventAdmissionControl(
+			cfg.Booking.AdmissionEventLimit,
+			cfg.Booking.AdmissionClientLimit,
+			cfg.Booking.AdmissionWindow(),
+		),
+		bookingHandler.ReserveSeat,
+	)
 	bookings.POST("/bulk-reserve", bookingHandler.BulkReserve)
 	bookings.POST("/purchase", idempotencyMiddleware.IdempotencyKey(), bookingHandler.PurchaseBooking)
 	bookings.GET("/my-bookings", bookingHandler.GetMyBookings)

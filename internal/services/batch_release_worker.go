@@ -72,6 +72,10 @@ func (w *BatchReleaseWorker) processDue(ctx context.Context, workerID int) {
 		}
 		if err := w.bookingService.ReleaseExpiredBookingByID(ctx, bookingID); err != nil {
 			log.Printf("BatchReleaseWorker[%d] release booking %s: %v", workerID, idStr, err)
+			continue
+		}
+		if err := w.expiryQueue.Remove(ctx, idStr); err != nil {
+			log.Printf("BatchReleaseWorker[%d] ack expiry %s: %v", workerID, idStr, err)
 		}
 	}
 }

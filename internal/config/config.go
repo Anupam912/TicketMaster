@@ -106,10 +106,17 @@ func (j JWTConfig) ExpiryDuration() time.Duration {
 
 type BookingConfig struct {
 	ReservationTimeoutMinutes int
+	AdmissionWindowSec        int
+	AdmissionEventLimit       int
+	AdmissionClientLimit      int
 }
 
 func (b BookingConfig) ReservationTimeout() time.Duration {
 	return time.Duration(b.ReservationTimeoutMinutes) * time.Minute
+}
+
+func (b BookingConfig) AdmissionWindow() time.Duration {
+	return time.Duration(b.AdmissionWindowSec) * time.Second
 }
 
 // WebSocketConfig holds WebSocket configuration.
@@ -202,6 +209,9 @@ func Load() (*Config, error) {
 		},
 		Booking: BookingConfig{
 			ReservationTimeoutMinutes: getEnvAsInt("RESERVATION_TIMEOUT_MINUTES", 10),
+			AdmissionWindowSec:        getEnvAsInt("BOOKING_ADMISSION_WINDOW_SEC", 60),
+			AdmissionEventLimit:       getEnvAsInt("BOOKING_ADMISSION_EVENT_LIMIT", 5000),
+			AdmissionClientLimit:      getEnvAsInt("BOOKING_ADMISSION_CLIENT_LIMIT", 10),
 		},
 		Queue: QueueConfig{
 			MaxRetries:               getEnvAsInt("QUEUE_MAX_RETRIES", 3),

@@ -18,8 +18,9 @@ import (
 
 // Configuration constants.
 const (
-	maxBulkSeats  = 500
-	bulkChunkSize = 50
+	maxBulkSeats                = 500
+	bulkChunkSize               = 50
+	purchaseProcessingExtension = 2 * time.Minute
 )
 
 // Sentinel errors for booking service operations.
@@ -91,21 +92,8 @@ func (s *BookingService) invalidateCache(eventID uuid.UUID) {
 
 // ReserveSeat reserves a specific seat for a user with a time-limited hold.
 func (s *BookingService) ReserveSeat(userID uuid.UUID, req *models.ReserveSeatRequest) (*models.Booking, error) {
-	event, err := s.eventRepo.FindByID(req.EventID)
-	if err != nil {
-		if errors.Is(err, repository.ErrEventNotFound) {
-			return nil, repository.ErrEventNotFound
-		}
-		return nil, fmt.Errorf("find event: %w", err)
-	}
-
-	if event.AvailableSeats <= 0 {
-		return nil, ErrNoAvailableSeats
-	}
-
 	expiresAt := time.Now().Add(s.config.Booking.ReservationTimeout())
-
-	seat, err := s.seatRepo.ReserveSeatWithLock(req.EventID, req.SeatNumber, expiresAt)
+	booking, err := s.bookingRepo.CreateReservation(userID, req.EventID, req.SeatNumber, expiresAt)
 	if err != nil {
 		if errors.Is(err, repository.ErrSeatAlreadyBooked) {
 			return nil, ErrSeatBeingBooked
@@ -113,32 +101,19 @@ func (s *BookingService) ReserveSeat(userID uuid.UUID, req *models.ReserveSeatRe
 		if errors.Is(err, repository.ErrSeatNotAvailable) {
 			return nil, ErrSeatNotAvailable
 		}
-		return nil, fmt.Errorf("reserve seat with lock: %w", err)
-	}
-
-	if err := s.eventRepo.DecrementAvailableSeats(req.EventID); err != nil {
-		_ = s.seatRepo.ReleaseSeat(seat.ID)
-		return nil, fmt.Errorf("decrement available seats: %w", err)
-	}
-
-	booking := &models.Booking{
-		UserID:      userID,
-		EventID:     req.EventID,
-		SeatID:      seat.ID,
-		Status:      models.BookingStatusReserved,
-		TotalAmount: event.TicketPrice,
-		ReservedAt:  time.Now(),
-		ExpiresAt:   expiresAt,
-	}
-
-	if err := s.bookingRepo.Create(booking); err != nil {
-		_ = s.seatRepo.ReleaseSeat(seat.ID)
-		_ = s.eventRepo.IncrementAvailableSeats(req.EventID)
-		return nil, fmt.Errorf("create booking: %w", err)
+		if errors.Is(err, repository.ErrNoAvailableSeats) {
+			return nil, ErrNoAvailableSeats
+		}
+		if errors.Is(err, repository.ErrEventNotFound) {
+			return nil, repository.ErrEventNotFound
+		}
+		return nil, fmt.Errorf("create reservation: %w", err)
 	}
 
 	if s.expiryQueue != nil {
-		_ = s.expiryQueue.Add(context.Background(), booking.ID.String(), booking.ExpiresAt)
+		if err := s.expiryQueue.Add(context.Background(), booking.ID.String(), booking.ExpiresAt); err != nil {
+			log.Printf("Warning: failed to enqueue reservation expiry booking_id=%s: %v", booking.ID, err)
+		}
 	}
 
 	s.invalidateCache(req.EventID)
@@ -170,26 +145,47 @@ func (s *BookingService) PurchaseBooking(userID, bookingID uuid.UUID) (*models.B
 		return nil, ErrBookingExpired
 	}
 
+	booking, err = s.bookingRepo.ExtendReservation(bookingID, time.Now().Add(purchaseProcessingExtension))
+	if err != nil {
+		if errors.Is(err, repository.ErrBookingExpired) {
+			return nil, ErrBookingExpired
+		}
+		if errors.Is(err, repository.ErrBookingNotReserved) {
+			return nil, ErrNotReserved
+		}
+		return nil, fmt.Errorf("extend reservation for purchase: %w", err)
+	}
+	if s.expiryQueue != nil {
+		if err := s.expiryQueue.Add(context.Background(), booking.ID.String(), booking.ExpiresAt); err != nil {
+			log.Printf("Warning: failed to extend reservation expiry booking_id=%s: %v", booking.ID, err)
+		}
+	}
+
 	if err := s.processPayment(booking); err != nil {
 		return nil, fmt.Errorf("payment failed: %w", err)
 	}
 
-	if err := s.bookingRepo.UpdateStatus(bookingID, models.BookingStatusPurchased); err != nil {
-		return nil, fmt.Errorf("update booking status: %w", err)
+	booking, err = s.bookingRepo.CompletePurchase(bookingID)
+	if err != nil {
+		if errors.Is(err, repository.ErrBookingExpired) {
+			return nil, ErrBookingExpired
+		}
+		if errors.Is(err, repository.ErrBookingNotReserved) {
+			updated, findErr := s.bookingRepo.FindByID(bookingID)
+			if findErr == nil && updated.Status == models.BookingStatusPurchased {
+				return updated, nil
+			}
+			return nil, ErrNotReserved
+		}
+		return nil, fmt.Errorf("complete purchase: %w", err)
 	}
 
 	if s.expiryQueue != nil {
-		_ = s.expiryQueue.Remove(context.Background(), bookingID.String())
+		if err := s.expiryQueue.Remove(context.Background(), bookingID.String()); err != nil {
+			log.Printf("Warning: failed to remove reservation expiry booking_id=%s: %v", bookingID, err)
+		}
 	}
 
-	if err := s.seatRepo.MarkAsSold(booking.SeatID); err != nil {
-		return nil, fmt.Errorf("mark seat as sold: %w", err)
-	}
-
-	booking, err = s.bookingRepo.FindByID(bookingID)
-	if err != nil {
-		return nil, fmt.Errorf("fetch updated booking: %w", err)
-	}
 	s.publishEvent("booking.purchased", booking, map[string]interface{}{"source": "booking_service"})
 
 	return booking, nil
@@ -214,20 +210,16 @@ func (s *BookingService) ReleaseExpiredBookingByID(ctx context.Context, bookingI
 
 // ReleaseExpiredBooking releases an expired booking, freeing the seat and updating counts.
 func (s *BookingService) ReleaseExpiredBooking(booking *models.Booking) error {
-	if err := s.bookingRepo.UpdateStatus(booking.ID, models.BookingStatusExpired); err != nil {
-		return fmt.Errorf("update booking status: %w", err)
+	released, err := s.bookingRepo.ReleaseExpiredReservation(booking.ID)
+	if err != nil {
+		if errors.Is(err, repository.ErrBookingNotReserved) {
+			return nil
+		}
+		return fmt.Errorf("release expired reservation: %w", err)
 	}
 
-	if err := s.seatRepo.ReleaseSeat(booking.SeatID); err != nil {
-		return fmt.Errorf("release seat: %w", err)
-	}
-
-	if err := s.eventRepo.IncrementAvailableSeats(booking.EventID); err != nil {
-		return fmt.Errorf("increment available seats: %w", err)
-	}
-
-	s.invalidateCache(booking.EventID)
-	s.publishEvent("booking.expired", booking, map[string]interface{}{"source": "booking_service"})
+	s.invalidateCache(released.EventID)
+	s.publishEvent("booking.expired", released, map[string]interface{}{"source": "booking_service"})
 
 	return nil
 }
@@ -279,7 +271,12 @@ func (s *BookingService) BulkReserve(userID uuid.UUID, req *models.BulkReserveRe
 
 	if firstErr != nil {
 		for _, b := range successful {
-			_ = s.ReleaseExpiredBooking(b)
+			if cancelled, err := s.bookingRepo.CancelReservation(b.ID); err == nil {
+				s.invalidateCache(cancelled.EventID)
+				if s.expiryQueue != nil {
+					_ = s.expiryQueue.Remove(context.Background(), cancelled.ID.String())
+				}
+			}
 		}
 		return nil, fmt.Errorf("bulk reserve failed: %w", firstErr)
 	}
@@ -343,20 +340,22 @@ func (s *BookingService) CancelBooking(userID, bookingID uuid.UUID) error {
 		return ErrOnlyReservedCancel
 	}
 
-	if err := s.bookingRepo.UpdateStatus(bookingID, models.BookingStatusCancelled); err != nil {
-		return fmt.Errorf("update booking status: %w", err)
+	cancelled, err := s.bookingRepo.CancelReservation(bookingID)
+	if err != nil {
+		if errors.Is(err, repository.ErrBookingNotReserved) {
+			return ErrOnlyReservedCancel
+		}
+		return fmt.Errorf("cancel reservation: %w", err)
 	}
 
-	if err := s.seatRepo.ReleaseSeat(booking.SeatID); err != nil {
-		return fmt.Errorf("release seat: %w", err)
+	if s.expiryQueue != nil {
+		if err := s.expiryQueue.Remove(context.Background(), bookingID.String()); err != nil {
+			log.Printf("Warning: failed to remove reservation expiry booking_id=%s: %v", bookingID, err)
+		}
 	}
 
-	if err := s.eventRepo.IncrementAvailableSeats(booking.EventID); err != nil {
-		return fmt.Errorf("increment available seats: %w", err)
-	}
-
-	s.invalidateCache(booking.EventID)
-	s.publishEvent("booking.cancelled", booking, map[string]interface{}{"source": "booking_service"})
+	s.invalidateCache(cancelled.EventID)
+	s.publishEvent("booking.cancelled", cancelled, map[string]interface{}{"source": "booking_service"})
 
 	return nil
 }

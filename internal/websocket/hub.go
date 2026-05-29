@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -10,7 +11,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/redis/go-redis/v9"
 )
+
+const seatUpdateFanoutChannel = "websocket:seat_updates"
 
 // Client represents a WebSocket client.
 type Client struct {
@@ -19,6 +23,7 @@ type Client struct {
 	Send     chan []byte
 	Hub      *Hub
 	EventIDs map[uuid.UUID]bool
+	mu       sync.RWMutex
 }
 
 // Hub maintains active WebSocket clients and broadcasts messages.
@@ -30,6 +35,8 @@ type Hub struct {
 	mu             sync.RWMutex
 	allowedOrigins []string
 	Upgrader       websocket.Upgrader
+	redis          *redis.Client
+	instanceID     string
 }
 
 // Message represents a WebSocket message.
@@ -38,6 +45,11 @@ type Message struct {
 	EventID uuid.UUID   `json:"event_id,omitempty"`
 	SeatID  uuid.UUID   `json:"seat_id,omitempty"`
 	Data    interface{} `json:"data,omitempty"`
+}
+
+type fanoutMessage struct {
+	SourceID string   `json:"source_id"`
+	Message  *Message `json:"message"`
 }
 
 // NewHub creates a new Hub with configurable CORS.
@@ -52,6 +64,7 @@ func NewHubWithConfig(cfg *config.Config) *Hub {
 		Broadcast:  make(chan *Message),
 		Register:   make(chan *Client),
 		Unregister: make(chan *Client),
+		instanceID: uuid.New().String(),
 	}
 
 	if cfg != nil {
@@ -65,6 +78,40 @@ func NewHubWithConfig(cfg *config.Config) *Hub {
 	}
 
 	return h
+}
+
+func (h *Hub) SetRedis(redisClient *redis.Client) {
+	h.redis = redisClient
+}
+
+func (h *Hub) StartFanout(ctx context.Context) {
+	if h.redis == nil {
+		return
+	}
+
+	pubsub := h.redis.Subscribe(ctx, seatUpdateFanoutChannel)
+	defer pubsub.Close()
+
+	ch := pubsub.Channel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			var envelope fanoutMessage
+			if err := json.Unmarshal([]byte(msg.Payload), &envelope); err != nil {
+				log.Printf("WebSocket fanout unmarshal error: %v", err)
+				continue
+			}
+			if envelope.SourceID == h.instanceID || envelope.Message == nil {
+				continue
+			}
+			h.broadcastLocal(envelope.Message)
+		}
+	}
 }
 
 // checkOrigin validates the request origin against allowed origins.
@@ -107,10 +154,10 @@ func (h *Hub) Run() {
 			log.Printf("Client disconnected: %s (Total: %d)", client.ID, len(h.Clients))
 
 		case message := <-h.Broadcast:
-			h.mu.RLock()
+			h.mu.Lock()
 			for client := range h.Clients {
 				if message.EventID != uuid.Nil {
-					if client.EventIDs[message.EventID] {
+					if client.subscribedTo(message.EventID) {
 						select {
 						case client.Send <- h.marshalMessage(message):
 						default:
@@ -127,7 +174,7 @@ func (h *Hub) Run() {
 					}
 				}
 			}
-			h.mu.RUnlock()
+			h.mu.Unlock()
 		}
 	}
 }
@@ -151,7 +198,31 @@ func (h *Hub) BroadcastSeatUpdate(eventID, seatID uuid.UUID, status string) {
 			"status":  status,
 		},
 	}
+	h.broadcastLocal(message)
+	h.publishFanout(message)
+}
+
+func (h *Hub) broadcastLocal(message *Message) {
 	h.Broadcast <- message
+}
+
+func (h *Hub) publishFanout(message *Message) {
+	if h.redis == nil {
+		return
+	}
+
+	payload, err := json.Marshal(fanoutMessage{
+		SourceID: h.instanceID,
+		Message:  message,
+	})
+	if err != nil {
+		log.Printf("WebSocket fanout marshal error: %v", err)
+		return
+	}
+
+	if err := h.redis.Publish(context.Background(), seatUpdateFanoutChannel, payload).Err(); err != nil {
+		log.Printf("WebSocket fanout publish error: %v", err)
+	}
 }
 
 func (h *Hub) HandleClient(conn *websocket.Conn) *Client {
@@ -190,7 +261,7 @@ func (c *Client) readPump() {
 			if msgType, ok := msg["type"].(string); ok && msgType == "subscribe" {
 				if eventIDStr, ok := msg["event_id"].(string); ok {
 					if eventID, err := uuid.Parse(eventIDStr); err == nil {
-						c.EventIDs[eventID] = true
+						c.subscribe(eventID)
 						log.Printf("Client %s subscribed to event %s", c.ID, eventID)
 					}
 				}
@@ -199,21 +270,27 @@ func (c *Client) readPump() {
 	}
 }
 
+func (c *Client) subscribe(eventID uuid.UUID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.EventIDs[eventID] = true
+}
+
+func (c *Client) subscribedTo(eventID uuid.UUID) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.EventIDs[eventID]
+}
+
 func (c *Client) writePump() {
 	defer c.Conn.Close()
 
-	for {
-		select {
-		case message, ok := <-c.Send:
-			if !ok {
-				c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
-
-			if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
-				log.Printf("WebSocket write error: %v", err)
-				return
-			}
+	for message := range c.Send {
+		if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
+			log.Printf("WebSocket write error: %v", err)
+			return
 		}
 	}
+	// Channel closed, send close message
+	c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
 }

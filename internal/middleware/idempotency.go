@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+)
+
+const (
+	idempotencyTTL        = 24 * time.Hour
+	idempotencyLockTTL    = 30 * time.Second
+	idempotencyKeyPrefix  = "idempotency:"
+	idempotencyLockPrefix = "idempotency:lock:"
 )
 
 type IdempotencyMiddleware struct {
@@ -28,9 +36,9 @@ func NewIdempotencyMiddleware(redis *redis.Client, cfg *config.Config) *Idempote
 
 func (m *IdempotencyMiddleware) IdempotencyKey() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if c.Request.Method != http.MethodPost && 
-		   c.Request.Method != http.MethodPut && 
-		   c.Request.Method != http.MethodPatch {
+		if c.Request.Method != http.MethodPost &&
+			c.Request.Method != http.MethodPut &&
+			c.Request.Method != http.MethodPatch {
 			c.Next()
 			return
 		}
@@ -41,23 +49,34 @@ func (m *IdempotencyMiddleware) IdempotencyKey() gin.HandlerFunc {
 			return
 		}
 
-		cacheKey := fmt.Sprintf("idempotency:%s", idempotencyKey)
-		
+		cacheKey := fmt.Sprintf("%s%s", idempotencyKeyPrefix, idempotencyKey)
+		lockKey := fmt.Sprintf("%s%s", idempotencyLockPrefix, idempotencyKey)
+
 		if m.redis != nil {
 			cachedResponse, err := m.redis.Get(c.Request.Context(), cacheKey).Result()
 			if err == nil {
 				var response CachedResponse
 				if err := json.Unmarshal([]byte(cachedResponse), &response); err == nil {
 					c.Status(response.StatusCode)
-					
+
 					for k, v := range response.Headers {
 						c.Header(k, v)
 					}
-					
+
 					c.Writer.Write(response.Body)
 					c.Abort()
 					return
 				}
+			}
+
+			locked, err := m.redis.SetNX(c.Request.Context(), lockKey, "1", idempotencyLockTTL).Result()
+			if err == nil && !locked {
+				c.JSON(http.StatusConflict, gin.H{"error": "request with this idempotency key is already in progress"})
+				c.Abort()
+				return
+			}
+			if err == nil {
+				defer m.redis.Del(context.WithoutCancel(c.Request.Context()), lockKey)
 			}
 		}
 
@@ -66,7 +85,8 @@ func (m *IdempotencyMiddleware) IdempotencyKey() gin.HandlerFunc {
 
 		responseWriter := &responseRecorder{
 			ResponseWriter: c.Writer,
-			body:          &bytes.Buffer{},
+			body:           &bytes.Buffer{},
+			statusCode:     http.StatusOK,
 		}
 
 		c.Writer = responseWriter
@@ -88,7 +108,7 @@ func (m *IdempotencyMiddleware) IdempotencyKey() gin.HandlerFunc {
 
 				data, err := json.Marshal(cachedResponse)
 				if err == nil {
-					m.redis.Set(c.Request.Context(), cacheKey, data, 24*time.Hour)
+					m.redis.Set(c.Request.Context(), cacheKey, data, idempotencyTTL)
 				}
 			}
 		}

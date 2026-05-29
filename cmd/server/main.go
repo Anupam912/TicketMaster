@@ -60,10 +60,12 @@ func main() {
 	}
 
 	hub := websocket.NewHubWithConfig(cfg)
+	hub.SetRedis(redisClient)
 	go hub.Run()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	go hub.StartFanout(ctx)
 
 	bookingRepo := repository.NewBookingRepository()
 	eventRepo := repository.NewEventRepository()
@@ -94,9 +96,8 @@ func main() {
 	if redisClient != nil {
 		go services.NewBatchReleaseWorker(bookingService, expiryQueue).Run(ctx)
 		log.Println("Batch release worker started")
-	} else {
-		go startCleanupJob(ctx, bookingService)
 	}
+	go startCleanupJob(ctx, bookingService)
 
 	q := queue.NewQueue(cfg, redisClient)
 	q.SetMaxRetries(cfg.Queue.MaxRetries)

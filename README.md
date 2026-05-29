@@ -16,6 +16,7 @@ A high-concurrency event ticketing system built with Go, PostgreSQL, and Redis.
 ## Features
 
 ### Core Features
+
 - User authentication with JWT
 - Role-based access control (Admin/User)
 - Event and venue management
@@ -23,10 +24,12 @@ A high-concurrency event ticketing system built with Go, PostgreSQL, and Redis.
 - Booking lifecycle: Reserve (10min) → Purchase → Release
 
 ### Advanced Features
+
 - **Asynchronous Processing**: Event-driven architecture with Redis Streams for handling 50K+ concurrent requests
 - **Idempotency**: Prevents duplicate charges with idempotency keys (critical for financial systems)
 - **Real-Time Updates**: WebSocket server for live seat availability updates
 - **Database Scaling**: Read replica support for horizontal read scaling
+- **Event-Aware Admission Control**: Per-event and per-user admission limits smooth hot ticket drops before they hit workers
 - Database transactions with row-level locking
 - Redis caching for event data
 - Rate limiting for high-traffic scenarios
@@ -50,6 +53,7 @@ make logs
 The API will be available at `http://localhost:8080`.
 
 **Available Make commands:**
+
 - `make up` - Start all services
 - `make down` - Stop all services
 - `make migrate` - Run database migrations
@@ -64,24 +68,28 @@ If you prefer running without Docker:
 
 1. Clone the repository
 2. Install dependencies:
+
 ```bash
 go mod download
 ```
 
-3. Set up environment variables:
+1. Set up environment variables:
+
 ```bash
 cp .env.example .env
 # Edit .env with your database and Redis credentials
 ```
 
-4. Start PostgreSQL and Redis locally
+1. Start PostgreSQL and Redis locally
 
-5. Run database migrations:
+2. Run database migrations:
+
 ```bash
 go run cmd/migrate/main.go
 ```
 
-6. Start the server:
+1. Start the server:
+
 ```bash
 go run cmd/server/main.go
 ```
@@ -90,7 +98,6 @@ go run cmd/server/main.go
 
 The system uses PostgreSQL's `SELECT FOR UPDATE` with `NOWAIT` to prevent double-booking. When a user reserves a seat, the row is locked until the transaction completes, ensuring atomicity.
 
-
 **Asynchronous Booking Processing**: Uses Redis Streams as a message queue to handle traffic spikes. API returns HTTP 202 (Accepted) immediately while background workers process requests.
 
 **Idempotency for Payments**: Middleware prevents duplicate charges when network requests fail. Uses idempotency keys stored in Redis with 24-hour TTL.
@@ -98,3 +105,5 @@ The system uses PostgreSQL's `SELECT FOR UPDATE` with `NOWAIT` to prevent double
 **Real-Time Seat Availability**: WebSocket server broadcasts seat status changes to all connected clients, eliminating the need for polling.
 
 **Database Read Replicas**: Supports read/write separation with automatic failover. Read queries use replicas, writes use primary database.
+
+**Event-Aware Admission Control**: Reservation requests are admitted by event ID using Redis-backed sliding windows. Configure with `BOOKING_ADMISSION_WINDOW_SEC`, `BOOKING_ADMISSION_EVENT_LIMIT`, and `BOOKING_ADMISSION_CLIENT_LIMIT`.
