@@ -72,6 +72,11 @@ frontend/.env.*.local
 *.tmp
 *.temp
 .cache/
+.gocache/
+.gomodcache/
+
+# Go tooling caches
+go.work.sum
 
 # Coverage reports
 coverage/

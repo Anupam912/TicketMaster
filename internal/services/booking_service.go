@@ -39,6 +39,10 @@ var (
 // CacheInvalidator is a callback function type for invalidating event cache.
 type CacheInvalidator func(eventID uuid.UUID)
 
+type BookingEventPublisher interface {
+	PublishBookingEvent(ctx context.Context, eventType string, booking *models.Booking, metadata map[string]interface{}) error
+}
+
 // BookingService handles booking-related business logic.
 type BookingService struct {
 	bookingRepo      *repository.BookingRepository
@@ -48,6 +52,7 @@ type BookingService struct {
 	expiryQueue      *queue.ExpiryQueue
 	cacheInvalidator CacheInvalidator
 	paymentService   *PaymentService
+	eventPublisher   BookingEventPublisher
 }
 
 // NewBookingService creates a new BookingService instance.
@@ -72,6 +77,10 @@ func NewBookingService(
 // SetCacheInvalidator sets the function to call when event cache needs invalidation.
 func (s *BookingService) SetCacheInvalidator(invalidator CacheInvalidator) {
 	s.cacheInvalidator = invalidator
+}
+
+func (s *BookingService) SetEventPublisher(publisher BookingEventPublisher) {
+	s.eventPublisher = publisher
 }
 
 func (s *BookingService) invalidateCache(eventID uuid.UUID) {
@@ -133,6 +142,7 @@ func (s *BookingService) ReserveSeat(userID uuid.UUID, req *models.ReserveSeatRe
 	}
 
 	s.invalidateCache(req.EventID)
+	s.publishEvent("booking.reserved", booking, map[string]interface{}{"source": "booking_service"})
 
 	return booking, nil
 }
@@ -180,6 +190,7 @@ func (s *BookingService) PurchaseBooking(userID, bookingID uuid.UUID) (*models.B
 	if err != nil {
 		return nil, fmt.Errorf("fetch updated booking: %w", err)
 	}
+	s.publishEvent("booking.purchased", booking, map[string]interface{}{"source": "booking_service"})
 
 	return booking, nil
 }
@@ -216,6 +227,7 @@ func (s *BookingService) ReleaseExpiredBooking(booking *models.Booking) error {
 	}
 
 	s.invalidateCache(booking.EventID)
+	s.publishEvent("booking.expired", booking, map[string]interface{}{"source": "booking_service"})
 
 	return nil
 }
@@ -344,6 +356,7 @@ func (s *BookingService) CancelBooking(userID, bookingID uuid.UUID) error {
 	}
 
 	s.invalidateCache(booking.EventID)
+	s.publishEvent("booking.cancelled", booking, map[string]interface{}{"source": "booking_service"})
 
 	return nil
 }
@@ -375,4 +388,13 @@ func (s *BookingService) CleanupExpiredReservations(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (s *BookingService) publishEvent(eventType string, booking *models.Booking, metadata map[string]interface{}) {
+	if s.eventPublisher == nil || booking == nil {
+		return
+	}
+	if err := s.eventPublisher.PublishBookingEvent(context.Background(), eventType, booking, metadata); err != nil {
+		log.Printf("Warning: failed to publish booking event type=%s booking_id=%s: %v", eventType, booking.ID, err)
+	}
 }

@@ -3,6 +3,7 @@ package routes
 import (
 	"event-ticketing-system/internal/config"
 	"event-ticketing-system/internal/handlers"
+	"event-ticketing-system/internal/kafka"
 	"event-ticketing-system/internal/middleware"
 	"event-ticketing-system/internal/queue"
 	"event-ticketing-system/internal/repository"
@@ -22,11 +23,15 @@ func SetupRoutes(
 	hub *websocket.Hub,
 ) *gin.Engine {
 	gin.SetMode(cfg.Server.GinMode)
-	router := gin.Default()
+	router := gin.New()
+	router.Use(gin.Recovery())
+	router.Use(middleware.RequestID())
+	router.Use(middleware.AccessLog())
 
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "healthy"})
 	})
+	router.GET("/metrics", handlers.ServePrometheusMetrics)
 
 	swaggerHandler := handlers.NewSwaggerHandler()
 	router.GET("/docs", swaggerHandler.ServeSwaggerUI)
@@ -38,7 +43,12 @@ func SetupRoutes(
 	seatRepo := repository.NewSeatRepository()
 	bookingRepo := repository.NewBookingRepository()
 
-	q := queue.NewQueue(redisClient)
+	q := queue.NewQueue(cfg, redisClient)
+	q.SetMaxRetries(cfg.Queue.MaxRetries)
+	var bookingQueue *queue.Queue
+	if q.Enabled() {
+		bookingQueue = q
+	}
 	expiryQueue := queue.NewExpiryQueue(redisClient)
 
 	authService := services.NewAuthService(userRepo, cfg)
@@ -48,11 +58,15 @@ func SetupRoutes(
 	bookingService := services.NewBookingService(bookingRepo, eventRepo, seatRepo, cfg, expiryQueue, paymentService)
 
 	bookingService.SetCacheInvalidator(eventService.InvalidateEventCache)
+	kafkaProducer, err := kafka.NewProducer(cfg)
+	if err == nil && kafkaProducer.Enabled() {
+		bookingService.SetEventPublisher(services.NewKafkaEventPublisher(kafkaProducer))
+	}
 
 	authHandler := handlers.NewAuthHandler(authService)
 	venueHandler := handlers.NewVenueHandler(venueService)
 	eventHandler := handlers.NewEventHandler(eventService)
-	bookingHandler := handlers.NewBookingHandler(bookingService, q)
+	bookingHandler := handlers.NewBookingHandler(bookingService, bookingQueue)
 	wsHandler := handlers.NewWebSocketHandler(hub)
 
 	authMiddleware := middleware.NewAuthMiddleware(cfg)
@@ -80,6 +94,7 @@ func SetupRoutes(
 	admin.GET("/users", authHandler.ListUsers)
 	admin.POST("/users/:id/promote", authHandler.PromoteToAdmin)
 	admin.POST("/users/:id/demote", authHandler.DemoteToUser)
+	admin.GET("/queue-metrics", bookingHandler.GetQueueMetrics)
 
 	venues := protected.Group("/venues")
 	venues.Use(authMiddleware.RequireAdmin())

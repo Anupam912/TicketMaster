@@ -380,3 +380,29 @@ func (h *BookingHandler) GetJobStatus(c *gin.Context) {
 
 	c.JSON(http.StatusOK, status)
 }
+
+// GetQueueMetrics godoc
+// @Summary      Get queue metrics
+// @Description  Returns queue depth and pending-message metrics for admin operations
+// @Tags         admin
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Success      200 {object} queue.QueueMetrics
+// @Failure      500 {object} map[string]string "Internal server error"
+// @Failure      503 {object} map[string]string "Async processing not available"
+// @Router       /admin/queue-metrics [get]
+func (h *BookingHandler) GetQueueMetrics(c *gin.Context) {
+	if h.queue == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "async processing not available"})
+		return
+	}
+
+	metrics, err := h.queue.GetMetrics(c.Request.Context(), "booking-workers", "purchase-workers")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get queue metrics"})
+		return
+	}
+
+	c.JSON(http.StatusOK, metrics)
+}

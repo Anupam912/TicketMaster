@@ -11,6 +11,8 @@ import (
 	"event-ticketing-system/internal/queue"
 	"event-ticketing-system/internal/repository"
 	"event-ticketing-system/internal/websocket"
+
+	"github.com/google/uuid"
 )
 
 type BookingWorker struct {
@@ -36,14 +38,15 @@ func NewBookingWorker(
 
 func (w *BookingWorker) StartBookingWorker(ctx context.Context) {
 	consumerGroup := "booking-workers"
-	
+	consumerID := fmt.Sprintf("booking-worker-%s", uuid.New().String()[:8])
+
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("Booking worker shutting down...")
 			return
 		default:
-			job, err := w.queue.DequeueBookingJob(ctx, consumerGroup)
+			job, messageID, err := w.queue.DequeueBookingJob(ctx, consumerGroup, consumerID)
 			if err != nil {
 				log.Printf("Error dequeuing booking job: %v", err)
 				time.Sleep(time.Second)
@@ -54,14 +57,14 @@ func (w *BookingWorker) StartBookingWorker(ctx context.Context) {
 				continue
 			}
 
-			if err := w.processBookingJob(ctx, job); err != nil {
+			if err := w.processBookingJob(ctx, consumerGroup, messageID, job); err != nil {
 				log.Printf("Error processing booking job %s: %v", job.ID, err)
 			}
 		}
 	}
 }
 
-func (w *BookingWorker) processBookingJob(ctx context.Context, job *queue.BookingJob) error {
+func (w *BookingWorker) processBookingJob(ctx context.Context, consumerGroup, messageID string, job *queue.BookingJob) error {
 	req := &models.ReserveSeatRequest{
 		EventID:    job.EventID,
 		SeatNumber: job.SeatNumber,
@@ -69,11 +72,13 @@ func (w *BookingWorker) processBookingJob(ctx context.Context, job *queue.Bookin
 
 	booking, err := w.bookingService.ReserveSeat(job.UserID, req)
 	if err != nil {
-		_ = w.queue.FailJob(ctx, job.ID, err.Error())
+		_ = w.queue.HandleBookingJobFailure(ctx, job, err.Error())
+		_ = w.queue.AckBookingJob(ctx, consumerGroup, messageID)
 		return fmt.Errorf("failed to reserve seat: %w", err)
 	}
 
 	_ = w.queue.CompleteJob(ctx, job.ID, booking.ID)
+	_ = w.queue.AckBookingJob(ctx, consumerGroup, messageID)
 
 	if w.hub != nil {
 		seatRepo := repository.NewSeatRepository()
@@ -107,14 +112,15 @@ func NewPurchaseWorker(
 
 func (w *PurchaseWorker) StartPurchaseWorker(ctx context.Context) {
 	consumerGroup := "purchase-workers"
-	
+	consumerID := fmt.Sprintf("purchase-worker-%s", uuid.New().String()[:8])
+
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("Purchase worker shutting down...")
 			return
 		default:
-			job, err := w.queue.DequeuePurchaseJob(ctx, consumerGroup)
+			job, messageID, err := w.queue.DequeuePurchaseJob(ctx, consumerGroup, consumerID)
 			if err != nil {
 				log.Printf("Error dequeuing purchase job: %v", err)
 				time.Sleep(time.Second)
@@ -125,21 +131,23 @@ func (w *PurchaseWorker) StartPurchaseWorker(ctx context.Context) {
 				continue
 			}
 
-			if err := w.processPurchaseJob(ctx, job); err != nil {
+			if err := w.processPurchaseJob(ctx, consumerGroup, messageID, job); err != nil {
 				log.Printf("Error processing purchase job %s: %v", job.ID, err)
 			}
 		}
 	}
 }
 
-func (w *PurchaseWorker) processPurchaseJob(ctx context.Context, job *queue.PurchaseJob) error {
+func (w *PurchaseWorker) processPurchaseJob(ctx context.Context, consumerGroup, messageID string, job *queue.PurchaseJob) error {
 	booking, err := w.bookingService.PurchaseBooking(job.UserID, job.BookingID)
 	if err != nil {
-		_ = w.queue.FailJob(ctx, job.ID, err.Error())
+		_ = w.queue.HandlePurchaseJobFailure(ctx, job, err.Error())
+		_ = w.queue.AckPurchaseJob(ctx, consumerGroup, messageID)
 		return fmt.Errorf("failed to purchase booking: %w", err)
 	}
 
 	_ = w.queue.CompleteJob(ctx, job.ID, booking.ID)
+	_ = w.queue.AckPurchaseJob(ctx, consumerGroup, messageID)
 
 	if w.hub != nil {
 		w.hub.BroadcastSeatUpdate(booking.EventID, booking.SeatID, "sold")
