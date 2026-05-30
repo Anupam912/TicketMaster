@@ -132,3 +132,9 @@ KAFKA_REQUIRED_ACKS=leader
 ```
 
 The service creates missing Kafka topics on startup for command, event, and DLQ topics. For Railway's single-broker Kafka templates, keep `KAFKA_TOPIC_REPLICATION_FACTOR=1`.
+
+If Railway logs show `relation "bookings" does not exist`, migrations did not run against the configured database. Set `RUN_MIGRATIONS_ON_START=true` and redeploy. The app also auto-runs migrations when Railway system variables are present unless `RUN_MIGRATIONS_ON_START=false` is set.
+
+If logs show `Kafka command queue not configured`, the app did not receive a Kafka broker variable. Add `KAFKA_URL=${{Kafka.KAFKA_URL}}` to the API service variables; use `KAFKA_PUBLIC_URL` only for external clients, not app-to-Kafka traffic inside Railway.
+
+If Railway reports a healthcheck failure, inspect the deployment logs before the first `Server starting on :$PORT` line. A fatal migration or database connection error exits the process before `/health` can respond. The healthcheck path should remain `/health`.

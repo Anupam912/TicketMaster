@@ -1,10 +1,7 @@
 package main
 
 import (
-	"database/sql"
 	"log"
-	"os"
-	"path/filepath"
 
 	"event-ticketing-system/internal/config"
 	"event-ticketing-system/internal/database"
@@ -23,20 +20,9 @@ func main() {
 	}
 	defer database.Close()
 
-	migrationPath := filepath.Join("internal", "database", "migrations.sql")
-	sqlBytes, err := os.ReadFile(migrationPath)
-	if err != nil {
-		log.Fatalf("Failed to read migration file: %v", err)
-	}
-
-	if err := executeMigration(database.DB, string(sqlBytes)); err != nil {
+	if err := database.RunMigrations(); err != nil {
 		log.Fatalf("Migration failed: %v", err)
 	}
 
 	log.Println("Migration completed successfully!")
-}
-
-func executeMigration(db *sql.DB, sql string) error {
-	_, err := db.Exec(sql)
-	return err
 }

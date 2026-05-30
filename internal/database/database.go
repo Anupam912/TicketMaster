@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"event-ticketing-system/internal/config"
 
@@ -12,14 +13,14 @@ import (
 )
 
 var (
-	DB *sql.DB
-	ReadDB *sql.DB
+	DB          *sql.DB
+	ReadDB      *sql.DB
 	readDBMutex sync.RWMutex
 )
 
 func Connect(cfg *config.Config) error {
 	var err error
-	
+
 	DB, err = sql.Open("postgres", cfg.Database.DSN())
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
@@ -27,7 +28,7 @@ func Connect(cfg *config.Config) error {
 
 	DB.SetMaxOpenConns(25)
 	DB.SetMaxIdleConns(5)
-	DB.SetConnMaxLifetime(5 * 60)
+	DB.SetConnMaxLifetime(5 * time.Minute)
 
 	if err = DB.Ping(); err != nil {
 		return fmt.Errorf("failed to ping database: %w", err)
@@ -43,8 +44,8 @@ func Connect(cfg *config.Config) error {
 		} else {
 			ReadDB.SetMaxOpenConns(25)
 			ReadDB.SetMaxIdleConns(5)
-			ReadDB.SetConnMaxLifetime(5 * 60)
-			
+			ReadDB.SetConnMaxLifetime(5 * time.Minute)
+
 			if err = ReadDB.Ping(); err != nil {
 				log.Printf("Warning: Failed to ping read replica: %v. Using primary for reads.", err)
 				ReadDB = nil
@@ -61,7 +62,7 @@ func Connect(cfg *config.Config) error {
 func GetReadDB() *sql.DB {
 	readDBMutex.RLock()
 	defer readDBMutex.RUnlock()
-	
+
 	if ReadDB != nil {
 		return ReadDB
 	}

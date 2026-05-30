@@ -258,7 +258,7 @@ func Load() (*Config, error) {
 }
 
 func getKafkaBrokers() []string {
-	for _, key := range []string{"KAFKA_BROKERS", "KAFKA_URL", "KAFKA_PUBLIC_URL"} {
+	for _, key := range []string{"KAFKA_BROKERS", "KAFKA_URL", "KAFKA_PRIVATE_URL", "KAFKA_PUBLIC_URL", "KAFKA_BROKER_URL"} {
 		brokers := parseKafkaBrokerList(os.Getenv(key))
 		if len(brokers) > 0 {
 			return brokers

@@ -49,6 +49,16 @@ func main() {
 	}
 	defer database.Close()
 
+	if shouldRunStartupMigrations() {
+		log.Println("Running database migrations before starting workers")
+		if err := database.RunMigrations(); err != nil {
+			log.Fatalf("Database migration failed: %v", err)
+		}
+		log.Println("Database migrations completed successfully")
+	} else {
+		log.Println("Database migrations disabled; set RUN_MIGRATIONS_ON_START=true to enable")
+	}
+
 	var redisClient *redis.Client
 	redisClient, err = appredis.Connect(cfg)
 	if err != nil {
@@ -129,7 +139,7 @@ func main() {
 		go queueMonitor.Run(ctx)
 		log.Println("Queue monitor started")
 	} else {
-		log.Println("Kafka command queue not configured; async booking queue disabled")
+		log.Println("Kafka command queue not configured; async booking queue disabled. Set KAFKA_URL or KAFKA_BROKERS.")
 	}
 
 	router := routes.SetupRoutes(cfg, redisClient, hub)
@@ -162,6 +172,20 @@ func main() {
 		log.Printf("HTTP server shutdown error: %v", err)
 	}
 	time.Sleep(500 * time.Millisecond)
+}
+
+func shouldRunStartupMigrations() bool {
+	value := os.Getenv("RUN_MIGRATIONS_ON_START")
+	switch value {
+	case "true", "1", "yes", "y", "on":
+		return true
+	case "false", "0", "no", "n", "off":
+		return false
+	}
+
+	return os.Getenv("RAILWAY_ENVIRONMENT") != "" ||
+		os.Getenv("RAILWAY_PROJECT_ID") != "" ||
+		os.Getenv("RAILWAY_SERVICE_ID") != ""
 }
 
 func startCleanupJob(ctx context.Context, bookingService *services.BookingService) {
