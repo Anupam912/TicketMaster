@@ -51,7 +51,7 @@ func NewProducer(cfg *config.Config) (*Producer, error) {
 		RequiredAcks:           acks,
 		Async:                  cfg.Kafka.Async,
 		AllowAutoTopicCreation: true,
-		Balancer:               &kafkago.LeastBytes{},
+		Balancer:               &kafkago.Hash{},
 	}
 
 	return &Producer{
@@ -86,7 +86,7 @@ func (p *Producer) PublishBookingEvent(ctx context.Context, event *BookingEvent)
 	}
 
 	msg := kafkago.Message{
-		Key:   []byte(event.BookingID),
+		Key:   []byte(event.EventID),
 		Value: value,
 		Time:  event.OccurredAt,
 		Headers: []kafkago.Header{

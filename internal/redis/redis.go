@@ -12,14 +12,23 @@ import (
 var Client *redis.Client
 
 func Connect(cfg *config.Config) (*redis.Client, error) {
-	Client = redis.NewClient(&redis.Options{
-		Addr:     cfg.Redis.Addr(),
-		Password: cfg.Redis.Password,
-		DB:       cfg.Redis.DB,
-	})
+	var err error
+	if cfg.Redis.URL != "" {
+		options, parseErr := redis.ParseURL(cfg.Redis.URL)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse Redis URL: %w", parseErr)
+		}
+		Client = redis.NewClient(options)
+	} else {
+		Client = redis.NewClient(&redis.Options{
+			Addr:     cfg.Redis.Addr(),
+			Password: cfg.Redis.Password,
+			DB:       cfg.Redis.DB,
+		})
+	}
 
 	ctx := context.Background()
-	_, err := Client.Ping(ctx).Result()
+	_, err = Client.Ping(ctx).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 	}

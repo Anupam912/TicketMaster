@@ -25,7 +25,8 @@ A high-concurrency event ticketing system built with Go, PostgreSQL, and Redis.
 
 ### Advanced Features
 
-- **Asynchronous Processing**: Event-driven architecture with Redis Streams for handling 50K+ concurrent requests
+- **Asynchronous Processing**: Event-driven architecture with Kafka command consumers for handling 50K+ concurrent requests
+- **Domain Event Consumers**: Kafka booking event consumers update cache and broadcast seat changes across instances
 - **Idempotency**: Prevents duplicate charges with idempotency keys (critical for financial systems)
 - **Real-Time Updates**: WebSocket server for live seat availability updates
 - **Database Scaling**: Read replica support for horizontal read scaling
@@ -98,7 +99,9 @@ go run cmd/server/main.go
 
 The system uses PostgreSQL's `SELECT FOR UPDATE` with `NOWAIT` to prevent double-booking. When a user reserves a seat, the row is locked until the transaction completes, ensuring atomicity.
 
-**Asynchronous Booking Processing**: Uses Redis Streams as a message queue to handle traffic spikes. API returns HTTP 202 (Accepted) immediately while background workers process requests.
+**Asynchronous Booking Processing**: Uses Kafka command topics as a message queue to handle traffic spikes. API returns HTTP 202 (Accepted) immediately while background workers process requests.
+
+**Booking Event Consumers**: Consumes `booking-events` with consumer group `booking-event-consumers`, routes invalid events to `KAFKA_BOOKING_EVENTS_DLQ_TOPIC`, invalidates event cache, and broadcasts seat updates.
 
 **Idempotency for Payments**: Middleware prevents duplicate charges when network requests fail. Uses idempotency keys stored in Redis with 24-hour TTL.
 
@@ -107,3 +110,25 @@ The system uses PostgreSQL's `SELECT FOR UPDATE` with `NOWAIT` to prevent double
 **Database Read Replicas**: Supports read/write separation with automatic failover. Read queries use replicas, writes use primary database.
 
 **Event-Aware Admission Control**: Reservation requests are admitted by event ID using Redis-backed sliding windows. Configure with `BOOKING_ADMISSION_WINDOW_SEC`, `BOOKING_ADMISSION_EVENT_LIMIT`, and `BOOKING_ADMISSION_CLIENT_LIMIT`.
+
+## Railway Deployment with Kafka
+
+The Docker image is Railway-ready and listens on the `PORT` variable. It also supports Railway-style service URLs:
+
+- `DATABASE_URL` or `POSTGRES_URL` for PostgreSQL
+- `REDIS_URL` for Redis
+- `KAFKA_URL` for private Railway Kafka access, with `KAFKA_BROKERS` still supported for local Docker
+
+Recommended Railway variables:
+
+```bash
+RUN_MIGRATIONS_ON_START=true
+DATABASE_URL=${{Postgres.DATABASE_URL}}
+REDIS_URL=${{Redis.REDIS_URL}}
+KAFKA_URL=${{Kafka.KAFKA_URL}}
+KAFKA_TOPIC_PARTITIONS=6
+KAFKA_TOPIC_REPLICATION_FACTOR=1
+KAFKA_REQUIRED_ACKS=leader
+```
+
+The service creates missing Kafka topics on startup for command, event, and DLQ topics. For Railway's single-broker Kafka templates, keep `KAFKA_TOPIC_REPLICATION_FACTOR=1`.

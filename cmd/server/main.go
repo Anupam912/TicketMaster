@@ -88,9 +88,24 @@ func main() {
 	if err != nil {
 		log.Printf("Warning: Failed to initialize Kafka producer: %v. Continuing without Kafka events.", err)
 	} else if kafkaProducer.Enabled() {
+		if err := kafka.EnsureTopics(ctx, cfg); err != nil {
+			log.Printf("Warning: Failed to ensure Kafka topics: %v", err)
+		}
 		defer kafkaProducer.Close()
 		bookingService.SetEventPublisher(services.NewKafkaEventPublisher(kafkaProducer))
 		log.Println("Kafka booking event publisher enabled")
+	}
+
+	bookingEventKafkaConsumer := kafka.NewBookingEventConsumer(cfg, "booking-event-consumers")
+	if bookingEventKafkaConsumer.Enabled() {
+		defer bookingEventKafkaConsumer.Close()
+		bookingEventConsumer := services.NewBookingEventConsumer(
+			bookingEventKafkaConsumer,
+			eventService.InvalidateEventCache,
+			hub,
+		)
+		go bookingEventConsumer.Run(ctx)
+		log.Println("Kafka booking event consumer started")
 	}
 
 	if redisClient != nil {

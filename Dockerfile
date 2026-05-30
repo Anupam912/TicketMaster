@@ -1,21 +1,16 @@
 # Build stage
-FROM golang:1.21-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
 # Install git for go mod download
 RUN apk add --no-cache git
 
-# Copy go mod files first for better caching
 COPY go.mod go.sum ./
+RUN go mod download
 
-# Copy source code
 COPY . .
 
-# Download dependencies and update go.sum
-RUN go mod tidy
-
-# Build binaries
 RUN CGO_ENABLED=0 go build -o server ./cmd/server
 RUN CGO_ENABLED=0 go build -o migrate ./cmd/migrate
 
@@ -45,4 +40,4 @@ USER appuser
 
 EXPOSE 8080
 
-CMD ["./server"]
+CMD ["sh", "-c", "if [ \"$RUN_MIGRATIONS_ON_START\" = \"true\" ]; then ./migrate; fi; exec ./server"]

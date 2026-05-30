@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -32,6 +33,7 @@ type ServerConfig struct {
 }
 
 type DatabaseConfig struct {
+	URL          string
 	Host         string
 	Port         string
 	User         string
@@ -42,14 +44,21 @@ type DatabaseConfig struct {
 	ReadPort     string
 	ReadUser     string
 	ReadPassword string
+	ReadURL      string
 }
 
 func (d DatabaseConfig) DSN() string {
+	if d.URL != "" {
+		return d.URL
+	}
 	return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
 		d.Host, d.Port, d.User, d.Password, d.Name, d.SSLMode)
 }
 
 func (d DatabaseConfig) ReadDSN() string {
+	if d.ReadURL != "" {
+		return d.ReadURL
+	}
 	if d.ReadHost == "" {
 		return ""
 	}
@@ -73,6 +82,7 @@ func (d DatabaseConfig) ReadDSN() string {
 }
 
 type RedisConfig struct {
+	URL      string
 	Host     string
 	Port     string
 	Password string
@@ -84,15 +94,18 @@ func (r RedisConfig) Addr() string {
 }
 
 type KafkaConfig struct {
-	Brokers               []string
-	BookingEventsTopic    string
-	BookingCommandsTopic  string
-	PurchaseCommandsTopic string
-	BookingDLQTopic       string
-	PurchaseDLQTopic      string
-	ClientID              string
-	RequiredAcks          string
-	Async                 bool
+	Brokers                []string
+	BookingEventsTopic     string
+	BookingEventsDLQTopic  string
+	BookingCommandsTopic   string
+	PurchaseCommandsTopic  string
+	BookingDLQTopic        string
+	PurchaseDLQTopic       string
+	ClientID               string
+	RequiredAcks           string
+	Async                  bool
+	TopicPartitions        int
+	TopicReplicationFactor int
 }
 
 type JWTConfig struct {
@@ -175,6 +188,7 @@ func Load() (*Config, error) {
 			ShutdownTimeoutSec: getEnvAsInt("HTTP_SHUTDOWN_TIMEOUT_SEC", 10),
 		},
 		Database: DatabaseConfig{
+			URL:          firstEnv("DATABASE_URL", "POSTGRES_URL"),
 			Host:         getEnv("DB_HOST", "localhost"),
 			Port:         getEnv("DB_PORT", "5432"),
 			User:         getEnv("DB_USER", "postgres"),
@@ -185,23 +199,28 @@ func Load() (*Config, error) {
 			ReadPort:     getEnv("DB_READ_PORT", ""),
 			ReadUser:     getEnv("DB_READ_USER", ""),
 			ReadPassword: getEnv("DB_READ_PASSWORD", ""),
+			ReadURL:      getEnv("DB_READ_URL", ""),
 		},
 		Redis: RedisConfig{
+			URL:      firstEnv("REDIS_URL", "RAILWAY_REDIS_URL"),
 			Host:     getEnv("REDIS_HOST", "localhost"),
 			Port:     getEnv("REDIS_PORT", "6379"),
 			Password: getEnv("REDIS_PASSWORD", ""),
 			DB:       getEnvAsInt("REDIS_DB", 0),
 		},
 		Kafka: KafkaConfig{
-			Brokers:               getEnvAsStringSlice("KAFKA_BROKERS", []string{}),
-			BookingEventsTopic:    getEnv("KAFKA_BOOKING_EVENTS_TOPIC", "booking-events"),
-			BookingCommandsTopic:  getEnv("KAFKA_BOOKING_COMMANDS_TOPIC", "booking-commands"),
-			PurchaseCommandsTopic: getEnv("KAFKA_PURCHASE_COMMANDS_TOPIC", "purchase-commands"),
-			BookingDLQTopic:       getEnv("KAFKA_BOOKING_DLQ_TOPIC", "booking-commands-dlq"),
-			PurchaseDLQTopic:      getEnv("KAFKA_PURCHASE_DLQ_TOPIC", "purchase-commands-dlq"),
-			ClientID:              getEnv("KAFKA_CLIENT_ID", "ticketmaster-api"),
-			RequiredAcks:          strings.ToLower(getEnv("KAFKA_REQUIRED_ACKS", "leader")),
-			Async:                 getEnvAsBool("KAFKA_ASYNC", true),
+			Brokers:                getKafkaBrokers(),
+			BookingEventsTopic:     getEnv("KAFKA_BOOKING_EVENTS_TOPIC", "booking-events"),
+			BookingEventsDLQTopic:  getEnv("KAFKA_BOOKING_EVENTS_DLQ_TOPIC", "booking-events-dlq"),
+			BookingCommandsTopic:   getEnv("KAFKA_BOOKING_COMMANDS_TOPIC", "booking-commands"),
+			PurchaseCommandsTopic:  getEnv("KAFKA_PURCHASE_COMMANDS_TOPIC", "purchase-commands"),
+			BookingDLQTopic:        getEnv("KAFKA_BOOKING_DLQ_TOPIC", "booking-commands-dlq"),
+			PurchaseDLQTopic:       getEnv("KAFKA_PURCHASE_DLQ_TOPIC", "purchase-commands-dlq"),
+			ClientID:               getEnv("KAFKA_CLIENT_ID", "ticketmaster-api"),
+			RequiredAcks:           strings.ToLower(getEnv("KAFKA_REQUIRED_ACKS", "leader")),
+			Async:                  getEnvAsBool("KAFKA_ASYNC", true),
+			TopicPartitions:        getEnvAsInt("KAFKA_TOPIC_PARTITIONS", 6),
+			TopicReplicationFactor: getEnvAsInt("KAFKA_TOPIC_REPLICATION_FACTOR", 1),
 		},
 		JWT: JWTConfig{
 			Secret:      getEnv("JWT_SECRET", "your-super-secret-jwt-key-change-this-in-production"),
@@ -238,6 +257,46 @@ func Load() (*Config, error) {
 	return config, nil
 }
 
+func getKafkaBrokers() []string {
+	for _, key := range []string{"KAFKA_BROKERS", "KAFKA_URL", "KAFKA_PUBLIC_URL"} {
+		brokers := parseKafkaBrokerList(os.Getenv(key))
+		if len(brokers) > 0 {
+			return brokers
+		}
+	}
+	return []string{}
+}
+
+func parseKafkaBrokerList(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+
+	var brokers []string
+	for _, rawBroker := range strings.Split(value, ",") {
+		broker := normalizeKafkaBroker(rawBroker)
+		if broker != "" {
+			brokers = append(brokers, broker)
+		}
+	}
+	return brokers
+}
+
+func normalizeKafkaBroker(value string) string {
+	broker := strings.TrimSpace(value)
+	if broker == "" {
+		return ""
+	}
+
+	if strings.Contains(broker, "://") {
+		if parsed, err := url.Parse(broker); err == nil && parsed.Host != "" {
+			broker = parsed.Host
+		}
+	}
+
+	return strings.TrimPrefix(broker, "//")
+}
+
 func getEnvAsStringSlice(key string, defaultValue []string) []string {
 	valueStr := os.Getenv(key)
 	if valueStr == "" {
@@ -258,6 +317,15 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+func firstEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := os.Getenv(key); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func getEnvAsInt(key string, defaultValue int) int {
