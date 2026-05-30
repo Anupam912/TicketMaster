@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
@@ -238,6 +239,10 @@ func (q *Queue) DequeueBookingJob(ctx context.Context, consumerGroup, _ string) 
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return nil, "", nil
 		}
+		if errors.Is(err, io.EOF) {
+			q.resetBookingReader(consumerGroup)
+			return nil, "", nil
+		}
 		return nil, "", fmt.Errorf("fetch booking command: %w", err)
 	}
 
@@ -263,6 +268,10 @@ func (q *Queue) DequeuePurchaseJob(ctx context.Context, consumerGroup, _ string)
 	msg, err := reader.FetchMessage(pollCtx)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return nil, "", nil
+		}
+		if errors.Is(err, io.EOF) {
+			q.resetPurchaseReader(consumerGroup)
 			return nil, "", nil
 		}
 		return nil, "", fmt.Errorf("fetch purchase command: %w", err)
@@ -487,6 +496,24 @@ func (q *Queue) getPurchaseReader(group string) *kafkago.Reader {
 	})
 	q.purchaseReaders[group] = r
 	return r
+}
+
+func (q *Queue) resetBookingReader(group string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if reader, ok := q.bookingReaders[group]; ok {
+		_ = reader.Close()
+		delete(q.bookingReaders, group)
+	}
+}
+
+func (q *Queue) resetPurchaseReader(group string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if reader, ok := q.purchaseReaders[group]; ok {
+		_ = reader.Close()
+		delete(q.purchaseReaders, group)
+	}
 }
 
 func parseMessageID(messageID string) (int, int64, error) {

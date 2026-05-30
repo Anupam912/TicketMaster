@@ -39,6 +39,8 @@ import (
 // @description Enter your JWT token (Bearer prefix added automatically)
 
 func main() {
+	log.SetOutput(os.Stdout)
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)

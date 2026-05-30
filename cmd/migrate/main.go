@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"os"
 
 	"event-ticketing-system/internal/config"
 	"event-ticketing-system/internal/database"
@@ -10,6 +11,8 @@ import (
 )
 
 func main() {
+	log.SetOutput(os.Stdout)
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
