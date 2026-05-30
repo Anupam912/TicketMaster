@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"event-ticketing-system/internal/config"
@@ -26,8 +28,11 @@ type BookingEventConsumer struct {
 	reader    *kafkago.Reader
 	dlqWriter *kafkago.Writer
 	enabled   bool
+	brokers   []string
+	groupID   string
 	topic     string
 	dlqTopic  string
+	mu        sync.Mutex
 }
 
 func NewBookingEventConsumer(cfg *config.Config, groupID string) *BookingEventConsumer {
@@ -38,16 +43,7 @@ func NewBookingEventConsumer(cfg *config.Config, groupID string) *BookingEventCo
 		groupID = "booking-event-consumers"
 	}
 
-	return &BookingEventConsumer{
-		reader: kafkago.NewReader(kafkago.ReaderConfig{
-			Brokers:        cfg.Kafka.Brokers,
-			GroupID:        groupID,
-			Topic:          cfg.Kafka.BookingEventsTopic,
-			MinBytes:       1,
-			MaxBytes:       10e6,
-			MaxWait:        bookingEventFetchTimeout,
-			CommitInterval: 0,
-		}),
+	consumer := &BookingEventConsumer{
 		dlqWriter: &kafkago.Writer{
 			Addr:                   kafkago.TCP(cfg.Kafka.Brokers...),
 			Topic:                  cfg.Kafka.BookingEventsDLQTopic,
@@ -56,9 +52,13 @@ func NewBookingEventConsumer(cfg *config.Config, groupID string) *BookingEventCo
 			Balancer:               &kafkago.Hash{},
 		},
 		enabled:  true,
+		brokers:  cfg.Kafka.Brokers,
+		groupID:  groupID,
 		topic:    cfg.Kafka.BookingEventsTopic,
 		dlqTopic: cfg.Kafka.BookingEventsDLQTopic,
 	}
+	consumer.reader = consumer.newReader()
+	return consumer
 }
 
 func (c *BookingEventConsumer) Enabled() bool {
@@ -98,6 +98,10 @@ func (c *BookingEventConsumer) Fetch(ctx context.Context) (*ConsumedBookingEvent
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return nil, nil
 		}
+		if errors.Is(err, io.EOF) {
+			c.resetReader()
+			return nil, nil
+		}
 		return nil, fmt.Errorf("fetch booking event: %w", err)
 	}
 
@@ -116,6 +120,27 @@ func (c *BookingEventConsumer) Fetch(ctx context.Context) (*ConsumedBookingEvent
 		Partition: msg.Partition,
 		Offset:    msg.Offset,
 	}, nil
+}
+
+func (c *BookingEventConsumer) newReader() *kafkago.Reader {
+	return kafkago.NewReader(kafkago.ReaderConfig{
+		Brokers:        c.brokers,
+		GroupID:        c.groupID,
+		Topic:          c.topic,
+		MinBytes:       1,
+		MaxBytes:       10e6,
+		MaxWait:        bookingEventFetchTimeout,
+		CommitInterval: 0,
+	})
+}
+
+func (c *BookingEventConsumer) resetReader() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.reader != nil {
+		_ = c.reader.Close()
+	}
+	c.reader = c.newReader()
 }
 
 func (c *BookingEventConsumer) Ack(ctx context.Context, consumed *ConsumedBookingEvent) error {

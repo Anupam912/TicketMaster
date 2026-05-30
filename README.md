@@ -138,3 +138,5 @@ If Railway logs show `relation "bookings" does not exist`, migrations did not ru
 If logs show `Kafka command queue not configured`, the app did not receive a Kafka broker variable. Add `KAFKA_URL=${{Kafka.KAFKA_URL}}` to the API service variables; use `KAFKA_PUBLIC_URL` only for external clients, not app-to-Kafka traffic inside Railway.
 
 If Railway reports a healthcheck failure, inspect the deployment logs before the first `Server starting on :$PORT` line. A fatal migration or database connection error exits the process before `/health` can respond. The healthcheck path should remain `/health`.
+
+If Kafka consumers repeatedly log `EOF`, the broker is closing the connection. Common Railway causes are using a public TCP proxy URL from inside Railway, a Kafka service still restarting, or incorrect advertised listeners. Use the template's private `KAFKA_URL` value for the API service and confirm the Kafka service advertises `PLAINTEXT://${{KAFKA_URL}}`.
