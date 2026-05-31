@@ -8,6 +8,7 @@ import (
 	"event-ticketing-system/internal/config"
 	"event-ticketing-system/internal/models"
 
+	"github.com/google/uuid"
 	"github.com/stripe/stripe-go/v76"
 	"github.com/stripe/stripe-go/v76/paymentintent"
 	"github.com/stripe/stripe-go/v76/refund"
@@ -15,19 +16,20 @@ import (
 
 // Sentinel errors for payment operations.
 var (
-	ErrPaymentFailed      = errors.New("payment processing failed")
-	ErrPaymentDeclined    = errors.New("payment was declined")
-	ErrRefundFailed       = errors.New("refund processing failed")
+	ErrPaymentFailed       = errors.New("payment processing failed")
+	ErrPaymentDeclined     = errors.New("payment was declined")
+	ErrRefundFailed        = errors.New("refund processing failed")
 	ErrStripeNotConfigured = errors.New("stripe is not configured")
+	ErrPaymentIntentMissing = errors.New("payment intent is not prepared")
 )
 
 // PaymentResult contains the result of a payment operation.
 type PaymentResult struct {
-	PaymentID     string  `json:"payment_id"`
-	Status        string  `json:"status"`
-	Amount        float64 `json:"amount"`
-	Currency      string  `json:"currency"`
-	ClientSecret  string  `json:"client_secret,omitempty"`
+	PaymentID    string  `json:"payment_id"`
+	Status       string  `json:"status"`
+	Amount       float64 `json:"amount"`
+	Currency     string  `json:"currency"`
+	ClientSecret string  `json:"client_secret,omitempty"`
 }
 
 // PaymentService handles payment processing via Stripe.
@@ -63,22 +65,11 @@ func (s *PaymentService) CreatePaymentIntent(ctx context.Context, booking *model
 		return s.simulatePayment(booking)
 	}
 
-	amountInCents := int64(booking.TotalAmount * 100)
-
-	params := &stripe.PaymentIntentParams{
-		Amount:   stripe.Int64(amountInCents),
-		Currency: stripe.String(s.config.Stripe.Currency),
-		Metadata: map[string]string{
-			"booking_id": booking.ID.String(),
-			"event_id":   booking.EventID.String(),
-			"user_id":    booking.UserID.String(),
-			"seat_id":    booking.SeatID.String(),
-		},
-		ReceiptEmail: stripe.String(userEmail),
-		Description:  stripe.String(fmt.Sprintf("Event ticket booking: %s", booking.ID.String())),
+	params := s.newPaymentIntentParams(booking)
+	if userEmail != "" {
+		params.ReceiptEmail = stripe.String(userEmail)
 	}
-
-	params.SetIdempotencyKey(fmt.Sprintf("booking_%s", booking.ID.String()))
+	params.SetIdempotencyKey(bookingPaymentIdempotencyKey(booking.ID))
 
 	pi, err := paymentintent.New(params)
 	if err != nil {
@@ -94,64 +85,40 @@ func (s *PaymentService) CreatePaymentIntent(ctx context.Context, booking *model
 	}, nil
 }
 
-// ProcessPayment processes an immediate payment (server-side).
-// This confirms a PaymentIntent that was created with automatic confirmation.
-func (s *PaymentService) ProcessPayment(ctx context.Context, booking *models.Booking) (*PaymentResult, error) {
+// PreparePaymentIntent creates an unconfirmed PaymentIntent to persist before charging.
+func (s *PaymentService) PreparePaymentIntent(ctx context.Context, booking *models.Booking) (*PaymentResult, error) {
 	if !s.isEnabled {
 		return s.simulatePayment(booking)
 	}
 
-	amountInCents := int64(booking.TotalAmount * 100)
-
-	params := &stripe.PaymentIntentParams{
-		Amount:             stripe.Int64(amountInCents),
-		Currency:           stripe.String(s.config.Stripe.Currency),
-		Confirm:            stripe.Bool(true),
-		PaymentMethod:      stripe.String("pm_card_visa"),
-		ReturnURL:          stripe.String(s.config.Stripe.WebhookURL),
-		Metadata: map[string]string{
-			"booking_id": booking.ID.String(),
-			"event_id":   booking.EventID.String(),
-			"user_id":    booking.UserID.String(),
-			"seat_id":    booking.SeatID.String(),
-		},
-		Description: stripe.String(fmt.Sprintf("Event ticket booking: %s", booking.ID.String())),
-	}
-
-	params.SetIdempotencyKey(fmt.Sprintf("booking_%s", booking.ID.String()))
+	params := s.newPaymentIntentParams(booking)
+	params.SetIdempotencyKey(bookingPaymentIdempotencyKey(booking.ID))
 
 	pi, err := paymentintent.New(params)
 	if err != nil {
-		stripeErr, ok := err.(*stripe.Error)
-		if ok {
-			switch stripeErr.Code {
-			case stripe.ErrorCodeCardDeclined:
-				return nil, ErrPaymentDeclined
-			default:
-				return nil, fmt.Errorf("%w: %s", ErrPaymentFailed, stripeErr.Msg)
-			}
-		}
-		return nil, fmt.Errorf("process payment: %w", err)
-	}
-
-	if pi.Status != stripe.PaymentIntentStatusSucceeded {
-		return nil, fmt.Errorf("%w: payment status is %s", ErrPaymentFailed, pi.Status)
+		return nil, mapStripePaymentError(err)
 	}
 
 	return &PaymentResult{
-		PaymentID: pi.ID,
-		Status:    string(pi.Status),
-		Amount:    booking.TotalAmount,
-		Currency:  s.config.Stripe.Currency,
+		PaymentID:    pi.ID,
+		Status:       string(pi.Status),
+		Amount:       booking.TotalAmount,
+		Currency:     s.config.Stripe.Currency,
+		ClientSecret: pi.ClientSecret,
 	}, nil
 }
 
-// ConfirmPayment confirms a PaymentIntent after client-side authentication.
-func (s *PaymentService) ConfirmPayment(ctx context.Context, paymentIntentID string) (*PaymentResult, error) {
+// ConfirmBookingPayment confirms a stored PaymentIntent, reusing it on purchase retries.
+func (s *PaymentService) ConfirmBookingPayment(ctx context.Context, paymentIntentID string) (*PaymentResult, error) {
+	if paymentIntentID == "" {
+		return nil, ErrPaymentIntentMissing
+	}
+
 	if !s.isEnabled {
 		return &PaymentResult{
 			PaymentID: paymentIntentID,
 			Status:    "succeeded",
+			Currency:  "usd",
 		}, nil
 	}
 
@@ -160,23 +127,39 @@ func (s *PaymentService) ConfirmPayment(ctx context.Context, paymentIntentID str
 		return nil, fmt.Errorf("get payment intent: %w", err)
 	}
 
-	if pi.Status == stripe.PaymentIntentStatusRequiresConfirmation {
-		pi, err = paymentintent.Confirm(paymentIntentID, nil)
-		if err != nil {
-			return nil, fmt.Errorf("confirm payment: %w", err)
-		}
+	if pi.Status == stripe.PaymentIntentStatusSucceeded {
+		return paymentResultFromIntent(pi), nil
+	}
+
+	confirmParams := &stripe.PaymentIntentConfirmParams{
+		PaymentMethod: stripe.String("pm_card_visa"),
+		ReturnURL:     stripe.String(s.config.Stripe.WebhookURL),
+	}
+
+	pi, err = paymentintent.Confirm(paymentIntentID, confirmParams)
+	if err != nil {
+		return nil, mapStripePaymentError(err)
 	}
 
 	if pi.Status != stripe.PaymentIntentStatusSucceeded {
 		return nil, fmt.Errorf("%w: payment status is %s", ErrPaymentFailed, pi.Status)
 	}
 
-	return &PaymentResult{
-		PaymentID: pi.ID,
-		Status:    string(pi.Status),
-		Amount:    float64(pi.Amount) / 100,
-		Currency:  string(pi.Currency),
-	}, nil
+	return paymentResultFromIntent(pi), nil
+}
+
+// ProcessPayment confirms the booking's stored PaymentIntent.
+func (s *PaymentService) ProcessPayment(ctx context.Context, booking *models.Booking) (*PaymentResult, error) {
+	if booking.PaymentIntentID == nil || *booking.PaymentIntentID == "" {
+		return nil, ErrPaymentIntentMissing
+	}
+
+	return s.ConfirmBookingPayment(ctx, *booking.PaymentIntentID)
+}
+
+// ConfirmPayment confirms a PaymentIntent after client-side authentication.
+func (s *PaymentService) ConfirmPayment(ctx context.Context, paymentIntentID string) (*PaymentResult, error) {
+	return s.ConfirmBookingPayment(ctx, paymentIntentID)
 }
 
 // RefundPayment processes a refund for a payment.
@@ -199,6 +182,43 @@ func (s *PaymentService) RefundPayment(ctx context.Context, paymentIntentID stri
 	}
 
 	return nil
+}
+
+func (s *PaymentService) newPaymentIntentParams(booking *models.Booking) *stripe.PaymentIntentParams {
+	amountInCents := int64(booking.TotalAmount * 100)
+
+	return &stripe.PaymentIntentParams{
+		Amount:   stripe.Int64(amountInCents),
+		Currency: stripe.String(s.config.Stripe.Currency),
+		Metadata: map[string]string{
+			"booking_id": booking.ID.String(),
+			"event_id":   booking.EventID.String(),
+			"user_id":    booking.UserID.String(),
+			"seat_id":    booking.SeatID.String(),
+		},
+		Description: stripe.String(fmt.Sprintf("Event ticket booking: %s", booking.ID.String())),
+	}
+}
+
+func bookingPaymentIdempotencyKey(bookingID uuid.UUID) string {
+	return fmt.Sprintf("booking_%s", bookingID.String())
+}
+
+func paymentResultFromIntent(pi *stripe.PaymentIntent) *PaymentResult {
+	return &PaymentResult{
+		PaymentID: pi.ID,
+		Status:    string(pi.Status),
+		Amount:    float64(pi.Amount) / 100,
+		Currency:  string(pi.Currency),
+	}
+}
+
+func mapStripePaymentError(err error) error {
+	stripeErr, ok := err.(*stripe.Error)
+	if ok && stripeErr.Code == stripe.ErrorCodeCardDeclined {
+		return ErrPaymentDeclined
+	}
+	return fmt.Errorf("%w: %v", ErrPaymentFailed, err)
 }
 
 // simulatePayment returns a simulated successful payment when Stripe is not configured.

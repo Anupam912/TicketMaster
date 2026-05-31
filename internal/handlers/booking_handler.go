@@ -77,7 +77,7 @@ func (h *BookingHandler) ReserveSeat(c *gin.Context) {
 		return
 	}
 
-	booking, err := h.bookingService.ReserveSeat(userID, &req)
+	booking, err := h.bookingService.ReserveSeat(c.Request.Context(), userID, &req)
 	if err != nil {
 		h.handleReservationError(c, err)
 		return
@@ -153,7 +153,7 @@ func (h *BookingHandler) PurchaseBooking(c *gin.Context) {
 		return
 	}
 
-	booking, err := h.bookingService.PurchaseBooking(userID, req.BookingID)
+	booking, err := h.bookingService.PurchaseBooking(c.Request.Context(), userID, req.BookingID)
 	if err != nil {
 		h.handlePurchaseError(c, err)
 		return
@@ -203,7 +203,7 @@ func (h *BookingHandler) BulkReserve(c *gin.Context) {
 		return
 	}
 
-	bookings, err := h.bookingService.BulkReserve(userID, &req)
+	bookings, err := h.bookingService.BulkReserve(c.Request.Context(), userID, &req)
 	if err != nil {
 		h.handleBulkReserveError(c, err)
 		return
@@ -283,7 +283,7 @@ func (h *BookingHandler) CancelBooking(c *gin.Context) {
 		return
 	}
 
-	if err := h.bookingService.CancelBooking(userID, bookingID); err != nil {
+	if err := h.bookingService.CancelBooking(c.Request.Context(), userID, bookingID); err != nil {
 		switch {
 		case errors.Is(err, services.ErrBookingNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})

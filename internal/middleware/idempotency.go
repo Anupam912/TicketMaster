@@ -51,6 +51,7 @@ func (m *IdempotencyMiddleware) IdempotencyKey() gin.HandlerFunc {
 
 		cacheKey := fmt.Sprintf("%s%s", idempotencyKeyPrefix, idempotencyKey)
 		lockKey := fmt.Sprintf("%s%s", idempotencyLockPrefix, idempotencyKey)
+		lockAcquired := false
 
 		if m.redis != nil {
 			cachedResponse, err := m.redis.Get(c.Request.Context(), cacheKey).Result()
@@ -75,8 +76,8 @@ func (m *IdempotencyMiddleware) IdempotencyKey() gin.HandlerFunc {
 				c.Abort()
 				return
 			}
-			if err == nil {
-				defer m.redis.Del(context.WithoutCancel(c.Request.Context()), lockKey)
+			if err == nil && locked {
+				lockAcquired = true
 			}
 		}
 
@@ -92,26 +93,40 @@ func (m *IdempotencyMiddleware) IdempotencyKey() gin.HandlerFunc {
 		c.Writer = responseWriter
 		c.Next()
 
-		if responseWriter.statusCode >= 200 && responseWriter.statusCode < 300 {
-			if m.redis != nil {
-				cachedResponse := CachedResponse{
-					StatusCode: responseWriter.statusCode,
-					Headers:    make(map[string]string),
-					Body:       responseWriter.body.Bytes(),
-				}
+		if m.redis == nil || !lockAcquired {
+			return
+		}
 
-				for k, v := range c.Writer.Header() {
-					if len(v) > 0 {
-						cachedResponse.Headers[k] = v[0]
-					}
-				}
+		if responseWriter.statusCode < 200 || responseWriter.statusCode >= 300 {
+			// Keep the lock until TTL so client timeout/retry cannot run a duplicate operation
+			// while the original request may still be in flight.
+			return
+		}
 
-				data, err := json.Marshal(cachedResponse)
-				if err == nil {
-					m.redis.Set(c.Request.Context(), cacheKey, data, idempotencyTTL)
-				}
+		cachedResponse := CachedResponse{
+			StatusCode: responseWriter.statusCode,
+			Headers:    make(map[string]string),
+			Body:       responseWriter.body.Bytes(),
+		}
+
+		for k, v := range c.Writer.Header() {
+			if len(v) > 0 {
+				cachedResponse.Headers[k] = v[0]
 			}
 		}
+
+		data, err := json.Marshal(cachedResponse)
+		if err != nil {
+			return
+		}
+
+		releaseCtx := context.WithoutCancel(c.Request.Context())
+		if err := m.redis.Set(releaseCtx, cacheKey, data, idempotencyTTL).Err(); err != nil {
+			return
+		}
+
+		// Release the lock only after the response is cached so retries replay the result.
+		_ = m.redis.Del(releaseCtx, lockKey).Err()
 	}
 }
 

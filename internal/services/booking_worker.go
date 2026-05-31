@@ -15,8 +15,11 @@ import (
 	"github.com/google/uuid"
 )
 
+const workerDequeueBackoff = time.Second
+
 type BookingWorker struct {
 	bookingService *BookingService
+	seatRepo       *repository.SeatRepository
 	queue          *queue.Queue
 	hub            *websocket.Hub
 	config         *config.Config
@@ -24,12 +27,14 @@ type BookingWorker struct {
 
 func NewBookingWorker(
 	bookingService *BookingService,
+	seatRepo *repository.SeatRepository,
 	q *queue.Queue,
 	hub *websocket.Hub,
 	cfg *config.Config,
 ) *BookingWorker {
 	return &BookingWorker{
 		bookingService: bookingService,
+		seatRepo:       seatRepo,
 		queue:          q,
 		hub:            hub,
 		config:         cfg,
@@ -49,11 +54,16 @@ func (w *BookingWorker) StartBookingWorker(ctx context.Context) {
 			job, messageID, err := w.queue.DequeueBookingJob(ctx, consumerGroup, consumerID)
 			if err != nil {
 				log.Printf("Error dequeuing booking job: %v", err)
-				time.Sleep(time.Second)
+				if !waitWithContext(ctx, workerDequeueBackoff) {
+					return
+				}
 				continue
 			}
 
 			if job == nil {
+				if !waitWithContext(ctx, workerDequeueBackoff) {
+					return
+				}
 				continue
 			}
 
@@ -70,7 +80,7 @@ func (w *BookingWorker) processBookingJob(ctx context.Context, consumerGroup, me
 		SeatNumber: job.SeatNumber,
 	}
 
-	booking, err := w.bookingService.ReserveSeat(job.UserID, req)
+	booking, err := w.bookingService.ReserveSeat(ctx, job.UserID, req)
 	if err != nil {
 		_ = w.queue.HandleBookingJobFailure(ctx, job, err.Error())
 		_ = w.queue.AckBookingJob(ctx, consumerGroup, messageID)
@@ -81,8 +91,7 @@ func (w *BookingWorker) processBookingJob(ctx context.Context, consumerGroup, me
 	_ = w.queue.AckBookingJob(ctx, consumerGroup, messageID)
 
 	if w.hub != nil {
-		seatRepo := repository.NewSeatRepository()
-		seat, err := seatRepo.FindByEventAndSeatNumber(job.EventID, job.SeatNumber)
+		seat, err := w.seatRepo.FindByEventAndSeatNumber(job.EventID, job.SeatNumber)
 		if err == nil && seat != nil {
 			w.hub.BroadcastSeatUpdate(job.EventID, seat.ID, "reserved")
 		}
@@ -123,11 +132,16 @@ func (w *PurchaseWorker) StartPurchaseWorker(ctx context.Context) {
 			job, messageID, err := w.queue.DequeuePurchaseJob(ctx, consumerGroup, consumerID)
 			if err != nil {
 				log.Printf("Error dequeuing purchase job: %v", err)
-				time.Sleep(time.Second)
+				if !waitWithContext(ctx, workerDequeueBackoff) {
+					return
+				}
 				continue
 			}
 
 			if job == nil {
+				if !waitWithContext(ctx, workerDequeueBackoff) {
+					return
+				}
 				continue
 			}
 
@@ -139,7 +153,7 @@ func (w *PurchaseWorker) StartPurchaseWorker(ctx context.Context) {
 }
 
 func (w *PurchaseWorker) processPurchaseJob(ctx context.Context, consumerGroup, messageID string, job *queue.PurchaseJob) error {
-	booking, err := w.bookingService.PurchaseBooking(job.UserID, job.BookingID)
+	booking, err := w.bookingService.PurchaseBooking(ctx, job.UserID, job.BookingID)
 	if err != nil {
 		_ = w.queue.HandlePurchaseJobFailure(ctx, job, err.Error())
 		_ = w.queue.AckPurchaseJob(ctx, consumerGroup, messageID)

@@ -118,10 +118,13 @@ func (j JWTConfig) ExpiryDuration() time.Duration {
 }
 
 type BookingConfig struct {
-	ReservationTimeoutMinutes int
-	AdmissionWindowSec        int
-	AdmissionEventLimit       int
-	AdmissionClientLimit      int
+	ReservationTimeoutMinutes      int
+	AdmissionWindowSec             int
+	AdmissionEventLimit            int
+	AdmissionClientLimit           int
+	ExpiryReleaseConcurrency       int
+	ExpiryReleasePartitionCount    int
+	ExpiryReleasePartitionOffset   int
 }
 
 func (b BookingConfig) ReservationTimeout() time.Duration {
@@ -227,10 +230,13 @@ func Load() (*Config, error) {
 			ExpiryHours: getEnvAsInt("JWT_EXPIRY_HOURS", 24),
 		},
 		Booking: BookingConfig{
-			ReservationTimeoutMinutes: getEnvAsInt("RESERVATION_TIMEOUT_MINUTES", 10),
-			AdmissionWindowSec:        getEnvAsInt("BOOKING_ADMISSION_WINDOW_SEC", 60),
-			AdmissionEventLimit:       getEnvAsInt("BOOKING_ADMISSION_EVENT_LIMIT", 5000),
-			AdmissionClientLimit:      getEnvAsInt("BOOKING_ADMISSION_CLIENT_LIMIT", 10),
+			ReservationTimeoutMinutes:    getEnvAsInt("RESERVATION_TIMEOUT_MINUTES", 10),
+			AdmissionWindowSec:           getEnvAsInt("BOOKING_ADMISSION_WINDOW_SEC", 60),
+			AdmissionEventLimit:          getEnvAsInt("BOOKING_ADMISSION_EVENT_LIMIT", 5000),
+			AdmissionClientLimit:         getEnvAsInt("BOOKING_ADMISSION_CLIENT_LIMIT", 10),
+			ExpiryReleaseConcurrency:     getEnvAsInt("EXPIRY_RELEASE_CONCURRENCY", 4),
+			ExpiryReleasePartitionCount:  getEnvAsInt("EXPIRY_RELEASE_PARTITION_COUNT", 0),
+			ExpiryReleasePartitionOffset: getEnvAsInt("EXPIRY_RELEASE_PARTITION_OFFSET", 0),
 		},
 		Queue: QueueConfig{
 			MaxRetries:               getEnvAsInt("QUEUE_MAX_RETRIES", 3),

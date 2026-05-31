@@ -12,16 +12,35 @@ import (
 )
 
 var (
-	ErrBookingNotFound    = errors.New("booking not found")
-	ErrNoAvailableSeats   = errors.New("no available seats")
-	ErrBookingNotReserved = errors.New("booking is not reserved")
-	ErrBookingExpired     = errors.New("booking has expired")
+	ErrBookingNotFound     = errors.New("booking not found")
+	ErrNoAvailableSeats    = errors.New("no available seats")
+	ErrBookingNotReserved  = errors.New("booking is not reserved")
+	ErrBookingNotPurchased = errors.New("booking is not purchased")
+	ErrBookingExpired      = errors.New("booking has expired")
 )
 
 type BookingRepository struct{}
 
+const bookingSelectColumns = `
+	id, user_id, event_id, seat_id, status, total_amount,
+	reserved_at, purchased_at, expires_at, created_at, updated_at, payment_intent_id`
+
 func NewBookingRepository() *BookingRepository {
 	return &BookingRepository{}
+}
+
+func applyBookingNullables(
+	booking *models.Booking,
+	purchasedAt sql.NullTime,
+	paymentIntentID sql.NullString,
+) {
+	if purchasedAt.Valid {
+		booking.PurchasedAt = &purchasedAt.Time
+	}
+	if paymentIntentID.Valid && paymentIntentID.String != "" {
+		intentID := paymentIntentID.String
+		booking.PaymentIntentID = &intentID
+	}
 }
 
 func (r *BookingRepository) Create(booking *models.Booking) error {
@@ -131,14 +150,14 @@ func (r *BookingRepository) CreateReservation(userID, eventID uuid.UUID, seatNum
 
 func (r *BookingRepository) FindByID(id uuid.UUID) (*models.Booking, error) {
 	query := `
-		SELECT 
-		id, user_id, event_id, seat_id, status, total_amount, reserved_at, purchased_at, expires_at, created_at, updated_at
+		SELECT ` + bookingSelectColumns + `
 		FROM bookings
 		WHERE id = $1
 	`
 
 	booking := &models.Booking{}
 	var purchasedAt sql.NullTime
+	var paymentIntentID sql.NullString
 
 	err := database.DB.QueryRow(query, id).Scan(
 		&booking.ID,
@@ -152,6 +171,7 @@ func (r *BookingRepository) FindByID(id uuid.UUID) (*models.Booking, error) {
 		&booking.ExpiresAt,
 		&booking.CreatedAt,
 		&booking.UpdatedAt,
+		&paymentIntentID,
 	)
 
 	if err != nil {
@@ -161,18 +181,47 @@ func (r *BookingRepository) FindByID(id uuid.UUID) (*models.Booking, error) {
 		return nil, err
 	}
 
-	if purchasedAt.Valid {
-		booking.PurchasedAt = &purchasedAt.Time
-	}
+	applyBookingNullables(booking, purchasedAt, paymentIntentID)
 
 	return booking, nil
+}
+
+// SetPaymentIntentID persists the Stripe PaymentIntent ID before charging.
+func (r *BookingRepository) SetPaymentIntentID(id uuid.UUID, paymentIntentID string) (*models.Booking, error) {
+	result, err := database.DB.Exec(`
+		UPDATE bookings
+		SET payment_intent_id = $1, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $2
+		  AND status IN ($3, $4)
+		  AND (payment_intent_id IS NULL OR payment_intent_id = '')
+	`, paymentIntentID, id, models.BookingStatusReserved, models.BookingStatusPurchased)
+	if err != nil {
+		return nil, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if rowsAffected == 0 {
+		existing, findErr := r.FindByID(id)
+		if findErr != nil {
+			return nil, findErr
+		}
+		if existing.PaymentIntentID != nil && *existing.PaymentIntentID != "" {
+			return existing, nil
+		}
+		return nil, ErrBookingNotReserved
+	}
+
+	return r.FindByID(id)
 }
 
 func (r *BookingRepository) FindByUserID(userID uuid.UUID) ([]*models.BookingWithDetails, error) {
 	query := `
 		SELECT 
 			b.id, b.user_id, b.event_id, b.seat_id, b.status, b.total_amount, 
-			b.reserved_at, b.purchased_at, b.expires_at, b.created_at, b.updated_at,
+			b.reserved_at, b.purchased_at, b.expires_at, b.created_at, b.updated_at, b.payment_intent_id,
 			e.title as event_title, e.event_date,
 			s.seat_number, v.name as venue_name
 		FROM bookings b
@@ -192,6 +241,7 @@ func (r *BookingRepository) FindByUserID(userID uuid.UUID) ([]*models.BookingWit
 	for rows.Next() {
 		booking := &models.BookingWithDetails{}
 		var purchasedAt sql.NullTime
+		var paymentIntentID sql.NullString
 
 		err := rows.Scan(
 			&booking.ID,
@@ -205,6 +255,7 @@ func (r *BookingRepository) FindByUserID(userID uuid.UUID) ([]*models.BookingWit
 			&booking.ExpiresAt,
 			&booking.CreatedAt,
 			&booking.UpdatedAt,
+			&paymentIntentID,
 			&booking.EventTitle,
 			&booking.EventDate,
 			&booking.SeatNumber,
@@ -214,9 +265,7 @@ func (r *BookingRepository) FindByUserID(userID uuid.UUID) ([]*models.BookingWit
 			return nil, err
 		}
 
-		if purchasedAt.Valid {
-			booking.PurchasedAt = &purchasedAt.Time
-		}
+		applyBookingNullables(&booking.Booking, purchasedAt, paymentIntentID)
 
 		bookings = append(bookings, booking)
 	}
@@ -300,7 +349,70 @@ func (r *BookingRepository) CompletePurchase(id uuid.UUID) (*models.Booking, err
 	return booking, nil
 }
 
+// RevertFailedPurchase undoes a committed purchase when payment fails afterward.
+func (r *BookingRepository) RevertFailedPurchase(id uuid.UUID) (*models.Booking, error) {
+	tx, err := database.DB.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	booking, err := findBookingForUpdateTx(tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if booking.Status != models.BookingStatusPurchased {
+		return nil, ErrBookingNotPurchased
+	}
+
+	result, err := tx.Exec(`
+		UPDATE bookings
+		SET status = $1, purchased_at = NULL, payment_intent_id = NULL, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $2 AND status = $3
+	`, models.BookingStatusCancelled, id, models.BookingStatusPurchased)
+	if err != nil {
+		return nil, err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if rowsAffected == 0 {
+		return nil, ErrBookingNotPurchased
+	}
+
+	if _, err := tx.Exec(`
+		UPDATE seats
+		SET status = $1, reserved_at = NULL, reserved_until = NULL
+		WHERE id = $2 AND status = $3
+	`, models.SeatStatusAvailable, booking.SeatID, models.SeatStatusSold); err != nil {
+		return nil, err
+	}
+
+	if _, err := tx.Exec(`
+		UPDATE events
+		SET available_seats = available_seats + 1,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+	`, booking.EventID); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	booking.Status = models.BookingStatusCancelled
+	booking.PurchasedAt = nil
+	booking.PaymentIntentID = nil
+	return booking, nil
+}
+
 func (r *BookingRepository) ExtendReservation(id uuid.UUID, extendUntil time.Time) (*models.Booking, error) {
+	if !extendUntil.After(time.Now()) {
+		return nil, ErrBookingExpired
+	}
+
 	tx, err := database.DB.Begin()
 	if err != nil {
 		return nil, err
@@ -317,15 +429,32 @@ func (r *BookingRepository) ExtendReservation(id uuid.UUID, extendUntil time.Tim
 	if time.Now().After(booking.ExpiresAt) {
 		return nil, ErrBookingExpired
 	}
-	if booking.ExpiresAt.Before(extendUntil) {
-		booking.ExpiresAt = extendUntil
+
+	seat, err := lockSeatByIDForUpdateTx(tx, booking.SeatID)
+	if err != nil {
+		return nil, err
 	}
+	if seat.EventID != booking.EventID {
+		return nil, ErrSeatNotAvailable
+	}
+	if seat.Status != models.SeatStatusReserved {
+		return nil, ErrSeatNotAvailable
+	}
+	if seat.ReservedUntil != nil && time.Now().After(*seat.ReservedUntil) {
+		return nil, ErrSeatNotAvailable
+	}
+
+	newExpiresAt := booking.ExpiresAt
+	if extendUntil.After(newExpiresAt) {
+		newExpiresAt = extendUntil
+	}
+	booking.ExpiresAt = newExpiresAt
 
 	result, err := tx.Exec(`
 		UPDATE bookings
 		SET expires_at = $1, updated_at = CURRENT_TIMESTAMP
 		WHERE id = $2 AND status = $3 AND expires_at > CURRENT_TIMESTAMP
-	`, booking.ExpiresAt, id, models.BookingStatusReserved)
+	`, newExpiresAt, id, models.BookingStatusReserved)
 	if err != nil {
 		return nil, err
 	}
@@ -337,12 +466,20 @@ func (r *BookingRepository) ExtendReservation(id uuid.UUID, extendUntil time.Tim
 		return nil, ErrBookingNotReserved
 	}
 
-	if _, err := tx.Exec(`
+	seatResult, err := tx.Exec(`
 		UPDATE seats
 		SET reserved_until = $1
 		WHERE id = $2 AND status = $3
-	`, booking.ExpiresAt, booking.SeatID, models.SeatStatusReserved); err != nil {
+	`, newExpiresAt, booking.SeatID, models.SeatStatusReserved)
+	if err != nil {
 		return nil, err
+	}
+	seatRowsAffected, err := seatResult.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if seatRowsAffected == 0 {
+		return nil, ErrSeatNotAvailable
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -426,8 +563,7 @@ func (r *BookingRepository) releaseReservation(id uuid.UUID, status models.Booki
 
 func (r *BookingRepository) FindExpiredReservations() ([]*models.Booking, error) {
 	query := `
-		SELECT 
-		id, user_id, event_id, seat_id, status, total_amount, reserved_at, purchased_at, expires_at, created_at, updated_at
+		SELECT ` + bookingSelectColumns + `
 		FROM bookings
 		WHERE status = $1 AND expires_at < CURRENT_TIMESTAMP
 	`
@@ -442,6 +578,7 @@ func (r *BookingRepository) FindExpiredReservations() ([]*models.Booking, error)
 	for rows.Next() {
 		booking := &models.Booking{}
 		var purchasedAt sql.NullTime
+		var paymentIntentID sql.NullString
 
 		err := rows.Scan(
 			&booking.ID,
@@ -455,14 +592,13 @@ func (r *BookingRepository) FindExpiredReservations() ([]*models.Booking, error)
 			&booking.ExpiresAt,
 			&booking.CreatedAt,
 			&booking.UpdatedAt,
+			&paymentIntentID,
 		)
 		if err != nil {
 			return nil, err
 		}
 
-		if purchasedAt.Valid {
-			booking.PurchasedAt = &purchasedAt.Time
-		}
+		applyBookingNullables(booking, purchasedAt, paymentIntentID)
 
 		bookings = append(bookings, booking)
 	}
@@ -474,6 +610,49 @@ func (r *BookingRepository) eventExistsTx(tx *sql.Tx, eventID uuid.UUID) (bool, 
 	var exists bool
 	err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM events WHERE id = $1)`, eventID).Scan(&exists)
 	return exists, err
+}
+
+func lockSeatByIDForUpdateTx(tx *sql.Tx, seatID uuid.UUID) (*models.Seat, error) {
+	seat := &models.Seat{}
+	var reservedAt, reservedUntilDB sql.NullTime
+	var rowNumber, section sql.NullString
+
+	err := tx.QueryRow(`
+		SELECT id, event_id, seat_number, row_number, section, status, reserved_at, reserved_until, created_at
+		FROM seats
+		WHERE id = $1
+		FOR UPDATE NOWAIT
+	`, seatID).Scan(
+		&seat.ID,
+		&seat.EventID,
+		&seat.SeatNumber,
+		&rowNumber,
+		&section,
+		&seat.Status,
+		&reservedAt,
+		&reservedUntilDB,
+		&seat.CreatedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrSeatNotFound
+		}
+		if isLockNotAvailable(err) {
+			return nil, ErrSeatAlreadyBooked
+		}
+		return nil, err
+	}
+
+	seat.RowNumber = rowNumber.String
+	seat.Section = section.String
+	if reservedAt.Valid {
+		seat.ReservedAt = &reservedAt.Time
+	}
+	if reservedUntilDB.Valid {
+		seat.ReservedUntil = &reservedUntilDB.Time
+	}
+
+	return seat, nil
 }
 
 func reserveSeatTx(tx *sql.Tx, eventID uuid.UUID, seatNumber string, reservedUntil time.Time) (*models.Seat, error) {
@@ -501,7 +680,7 @@ func reserveSeatTx(tx *sql.Tx, eventID uuid.UUID, seatNumber string, reservedUnt
 		if err == sql.ErrNoRows {
 			return nil, ErrSeatNotFound
 		}
-		if err.Error() == `pq: could not obtain lock on row in relation "seats"` {
+		if isLockNotAvailable(err) {
 			return nil, ErrSeatAlreadyBooked
 		}
 		return nil, err
@@ -541,9 +720,10 @@ func reserveSeatTx(tx *sql.Tx, eventID uuid.UUID, seatNumber string, reservedUnt
 func findBookingForUpdateTx(tx *sql.Tx, id uuid.UUID) (*models.Booking, error) {
 	booking := &models.Booking{}
 	var purchasedAt sql.NullTime
+	var paymentIntentID sql.NullString
 
 	err := tx.QueryRow(`
-		SELECT id, user_id, event_id, seat_id, status, total_amount, reserved_at, purchased_at, expires_at, created_at, updated_at
+		SELECT `+bookingSelectColumns+`
 		FROM bookings
 		WHERE id = $1
 		FOR UPDATE
@@ -559,6 +739,7 @@ func findBookingForUpdateTx(tx *sql.Tx, id uuid.UUID) (*models.Booking, error) {
 		&booking.ExpiresAt,
 		&booking.CreatedAt,
 		&booking.UpdatedAt,
+		&paymentIntentID,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -567,9 +748,7 @@ func findBookingForUpdateTx(tx *sql.Tx, id uuid.UUID) (*models.Booking, error) {
 		return nil, err
 	}
 
-	if purchasedAt.Valid {
-		booking.PurchasedAt = &purchasedAt.Time
-	}
+	applyBookingNullables(booking, purchasedAt, paymentIntentID)
 
 	return booking, nil
 }

@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"sync"
@@ -14,7 +15,15 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const seatUpdateFanoutChannel = "websocket:seat_updates"
+const (
+	seatUpdateFanoutChannel = "websocket:seat_updates"
+
+	// Buffered hub channels avoid blocking producers when Run is busy fanning out.
+	broadcastQueueSize   = 512
+	registerQueueSize    = 64
+	unregisterQueueSize  = 64
+	clientSendBufferSize = 256
+)
 
 // Client represents a WebSocket client.
 type Client struct {
@@ -33,10 +42,11 @@ type Hub struct {
 	Register       chan *Client
 	Unregister     chan *Client
 	mu             sync.RWMutex
-	allowedOrigins []string
+	wsConfig       config.WebSocketConfig
 	Upgrader       websocket.Upgrader
 	redis          *redis.Client
 	instanceID     string
+	publishCtx     context.Context
 }
 
 // Message represents a WebSocket message.
@@ -61,14 +71,14 @@ func NewHub() *Hub {
 func NewHubWithConfig(cfg *config.Config) *Hub {
 	h := &Hub{
 		Clients:    make(map[*Client]bool),
-		Broadcast:  make(chan *Message),
-		Register:   make(chan *Client),
-		Unregister: make(chan *Client),
+		Broadcast:  make(chan *Message, broadcastQueueSize),
+		Register:   make(chan *Client, registerQueueSize),
+		Unregister: make(chan *Client, unregisterQueueSize),
 		instanceID: uuid.New().String(),
 	}
 
 	if cfg != nil {
-		h.allowedOrigins = cfg.WebSocket.AllowedOrigins
+		h.wsConfig = cfg.WebSocket
 	}
 
 	h.Upgrader = websocket.Upgrader{
@@ -82,6 +92,12 @@ func NewHubWithConfig(cfg *config.Config) *Hub {
 
 func (h *Hub) SetRedis(redisClient *redis.Client) {
 	h.redis = redisClient
+}
+
+// SetContext binds a cancellable context used for Redis publish (e.g. app shutdown).
+// Call before starting Run or any code that calls BroadcastSeatUpdate.
+func (h *Hub) SetContext(ctx context.Context) {
+	h.publishCtx = ctx
 }
 
 func (h *Hub) StartFanout(ctx context.Context) {
@@ -114,21 +130,15 @@ func (h *Hub) StartFanout(ctx context.Context) {
 	}
 }
 
-// checkOrigin validates the request origin against allowed origins.
+// checkOrigin validates the request origin using WebSocketConfig.IsOriginAllowed.
 func (h *Hub) checkOrigin(r *http.Request) bool {
-	if len(h.allowedOrigins) == 0 {
-		return true
-	}
-
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return true
 	}
 
-	for _, allowed := range h.allowedOrigins {
-		if allowed == "*" || allowed == origin {
-			return true
-		}
+	if h.wsConfig.IsOriginAllowed(origin) {
+		return true
 	}
 
 	log.Printf("WebSocket connection rejected: origin %s not allowed", origin)
@@ -141,42 +151,67 @@ func (h *Hub) Run() {
 		case client := <-h.Register:
 			h.mu.Lock()
 			h.Clients[client] = true
+			total := len(h.Clients)
 			h.mu.Unlock()
-			log.Printf("Client connected: %s (Total: %d)", client.ID, len(h.Clients))
+			log.Printf("Client connected: %s (Total: %d)", client.ID, total)
 
 		case client := <-h.Unregister:
-			h.mu.Lock()
-			if _, ok := h.Clients[client]; ok {
-				delete(h.Clients, client)
-				close(client.Send)
-			}
-			h.mu.Unlock()
-			log.Printf("Client disconnected: %s (Total: %d)", client.ID, len(h.Clients))
+			h.removeClient(client)
 
 		case message := <-h.Broadcast:
-			h.mu.Lock()
-			for client := range h.Clients {
-				if message.EventID != uuid.Nil {
-					if client.subscribedTo(message.EventID) {
-						select {
-						case client.Send <- h.marshalMessage(message):
-						default:
-							close(client.Send)
-							delete(h.Clients, client)
-						}
-					}
-				} else {
-					select {
-					case client.Send <- h.marshalMessage(message):
-					default:
-						close(client.Send)
-						delete(h.Clients, client)
-					}
-				}
-			}
-			h.mu.Unlock()
+			h.deliverToClients(message)
 		}
 	}
+}
+
+// removeClient disconnects a client and closes its send channel.
+func (h *Hub) removeClient(client *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if _, ok := h.Clients[client]; ok {
+		delete(h.Clients, client)
+		close(client.Send)
+		log.Printf("Client disconnected: %s (Total: %d)", client.ID, len(h.Clients))
+	}
+}
+
+// deliverToClients fans out a message without holding the hub lock during sends.
+// Slow clients are dropped (channel closed) when their send buffer is full.
+func (h *Hub) deliverToClients(message *Message) {
+	payload := h.marshalMessage(message)
+
+	h.mu.RLock()
+	recipients := make([]*Client, 0, len(h.Clients))
+	for client := range h.Clients {
+		if message.EventID == uuid.Nil || client.subscribedTo(message.EventID) {
+			recipients = append(recipients, client)
+		}
+	}
+	h.mu.RUnlock()
+
+	var stale []*Client
+	for _, client := range recipients {
+		select {
+		case client.Send <- payload:
+		default:
+			stale = append(stale, client)
+		}
+	}
+
+	if len(stale) == 0 {
+		return
+	}
+
+	h.mu.Lock()
+	for _, client := range stale {
+		if _, ok := h.Clients[client]; ok {
+			delete(h.Clients, client)
+			close(client.Send)
+			log.Printf("WebSocket client %s dropped: send buffer full", client.ID)
+		}
+	}
+	h.mu.Unlock()
 }
 
 func (h *Hub) marshalMessage(msg *Message) []byte {
@@ -202,8 +237,19 @@ func (h *Hub) BroadcastSeatUpdate(eventID, seatID uuid.UUID, status string) {
 	h.publishFanout(message)
 }
 
+// broadcastLocal enqueues a message for the hub loop. Never blocks callers:
+// if the queue is full, the message is dropped (backpressure).
 func (h *Hub) broadcastLocal(message *Message) {
-	h.Broadcast <- message
+	select {
+	case h.Broadcast <- message:
+	default:
+		log.Printf(
+			"WebSocket broadcast queue full (cap=%d), dropping type=%s event_id=%s",
+			broadcastQueueSize,
+			message.Type,
+			message.EventID,
+		)
+	}
 }
 
 func (h *Hub) publishFanout(message *Message) {
@@ -220,7 +266,15 @@ func (h *Hub) publishFanout(message *Message) {
 		return
 	}
 
-	if err := h.redis.Publish(context.Background(), seatUpdateFanoutChannel, payload).Err(); err != nil {
+	ctx := h.publishCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if err := h.redis.Publish(ctx, seatUpdateFanoutChannel, payload).Err(); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
 		log.Printf("WebSocket fanout publish error: %v", err)
 	}
 }
@@ -229,7 +283,7 @@ func (h *Hub) HandleClient(conn *websocket.Conn) *Client {
 	client := &Client{
 		ID:       uuid.New(),
 		Conn:     conn,
-		Send:     make(chan []byte, 256),
+		Send:     make(chan []byte, clientSendBufferSize),
 		Hub:      h,
 		EventIDs: make(map[uuid.UUID]bool),
 	}

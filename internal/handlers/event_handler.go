@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"event-ticketing-system/internal/database"
 	"event-ticketing-system/internal/middleware"
 	"event-ticketing-system/internal/models"
 	"event-ticketing-system/internal/services"
@@ -148,7 +149,12 @@ func (h *EventHandler) GetEventSeats(c *gin.Context) {
 		return
 	}
 
-	response, err := h.eventService.GetEventSeats(c.Request.Context(), id, statusFilter)
+	readCtx := c.Request.Context()
+	if userID, err := middleware.GetUserID(c); err == nil {
+		readCtx = database.ContextForSeatReads(readCtx, userID, id)
+	}
+
+	response, err := h.eventService.GetEventSeats(readCtx, id, statusFilter)
 	if err != nil {
 		if errors.Is(err, services.ErrEventNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "event not found"})

@@ -123,29 +123,23 @@ func (rl *RateLimiter) checkRedisRateLimit(ctx context.Context, key string, maxR
 	redisKey := fmt.Sprintf("ratelimit:%s", key)
 	now := time.Now()
 	windowStart := now.Add(-window)
+	member := fmt.Sprintf("%d", now.UnixNano())
 
-	count, err := rl.redis.ZCount(ctx, redisKey, fmt.Sprintf("%d", windowStart.Unix()), fmt.Sprintf("%d", now.Unix())).Result()
+	result, err := slidingWindowRateLimitScript.Run(
+		ctx,
+		rl.redis,
+		[]string{redisKey},
+		windowStart.Unix(),
+		now.Unix(),
+		member,
+		maxRequests,
+		int(window.Seconds()),
+	).Int()
 	if err != nil {
 		return false, err
 	}
 
-	if count < int64(maxRequests) {
-		member := fmt.Sprintf("%d", now.UnixNano())
-		pipe := rl.redis.Pipeline()
-		pipe.ZAdd(ctx, redisKey, redis.Z{
-			Score:  float64(now.Unix()),
-			Member: member,
-		})
-		pipe.Expire(ctx, redisKey, window)
-		pipe.ZRemRangeByScore(ctx, redisKey, "0", fmt.Sprintf("%d", windowStart.Unix()))
-		_, err := pipe.Exec(ctx)
-		if err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-
-	return false, nil
+	return result == 1, nil
 }
 
 func (rl *RateLimiter) checkRedisEventAdmission(
@@ -160,19 +154,13 @@ func (rl *RateLimiter) checkRedisEventAdmission(
 		return true, nil
 	}
 
-	now := time.Now()
-	windowStart := now.Add(-window)
-	member := fmt.Sprintf("%d:%s", now.UnixNano(), clientID)
-	eventKey := fmt.Sprintf("admission:event:%s", eventID)
-	clientKey := fmt.Sprintf("admission:event:%s:client:%s", eventID, clientID)
+	eventCounterKey := fmt.Sprintf("admission:event:%s:count", eventID)
+	clientCounterKey := fmt.Sprintf("admission:event:%s:client:%s:count", eventID, clientID)
 
 	result, err := eventAdmissionScript.Run(
 		ctx,
 		rl.redis,
-		[]string{eventKey, clientKey},
-		windowStart.UnixNano(),
-		now.UnixNano(),
-		member,
+		[]string{eventCounterKey, clientCounterKey},
 		int(window.Seconds()),
 		maxEventRequests,
 		maxClientRequests,
@@ -233,21 +221,18 @@ func (rl *RateLimiter) SimpleRateLimit() gin.HandlerFunc {
 func (rl *RateLimiter) checkRedisSimpleLimit(ctx context.Context, key string, maxRequests int, window time.Duration) (bool, error) {
 	redisKey := fmt.Sprintf("ratelimit:simple:%s", key)
 
-	count, err := rl.redis.Get(ctx, redisKey).Int()
-	if err != nil && err != redis.Nil {
+	result, err := fixedWindowRateLimitScript.Run(
+		ctx,
+		rl.redis,
+		[]string{redisKey},
+		maxRequests,
+		int(window.Seconds()),
+	).Int()
+	if err != nil {
 		return false, err
 	}
 
-	if count >= maxRequests {
-		return false, nil
-	}
-
-	pipe := rl.redis.Pipeline()
-	pipe.Incr(ctx, redisKey)
-	pipe.Expire(ctx, redisKey, window)
-	_, err = pipe.Exec(ctx)
-
-	return err == nil, err
+	return result == 1, nil
 }
 
 func readEventID(c *gin.Context) (uuid.UUID, error) {
@@ -276,30 +261,74 @@ func writeAdmissionRejected(c *gin.Context) {
 	c.Abort()
 }
 
-var eventAdmissionScript = redis.NewScript(`
-local event_key = KEYS[1]
-local client_key = KEYS[2]
+var slidingWindowRateLimitScript = redis.NewScript(`
+local key = KEYS[1]
 local window_start = ARGV[1]
 local now = ARGV[2]
 local member = ARGV[3]
-local ttl_seconds = tonumber(ARGV[4])
-local event_limit = tonumber(ARGV[5])
-local client_limit = tonumber(ARGV[6])
+local max_requests = tonumber(ARGV[4])
+local ttl_seconds = tonumber(ARGV[5])
 
-redis.call("ZREMRANGEBYSCORE", event_key, 0, window_start)
-redis.call("ZREMRANGEBYSCORE", client_key, 0, window_start)
+redis.call("ZREMRANGEBYSCORE", key, "0", window_start)
+local count = redis.call("ZCOUNT", key, window_start, now)
 
-local event_count = redis.call("ZCARD", event_key)
-local client_count = redis.call("ZCARD", client_key)
-
-if event_count >= event_limit or client_count >= client_limit then
+if count >= max_requests then
+	redis.call("EXPIRE", key, ttl_seconds)
 	return 0
 end
 
-redis.call("ZADD", event_key, now, member)
-redis.call("ZADD", client_key, now, member)
-redis.call("EXPIRE", event_key, ttl_seconds)
-redis.call("EXPIRE", client_key, ttl_seconds)
+redis.call("ZADD", key, now, member)
+redis.call("EXPIRE", key, ttl_seconds)
+return 1
+`)
+
+var fixedWindowRateLimitScript = redis.NewScript(`
+local key = KEYS[1]
+local max_requests = tonumber(ARGV[1])
+local ttl_seconds = tonumber(ARGV[2])
+
+local count = redis.call("INCR", key)
+if count == 1 or redis.call("TTL", key) < 0 then
+	redis.call("EXPIRE", key, ttl_seconds)
+end
+
+if count > max_requests then
+	redis.call("EXPIRE", key, ttl_seconds)
+	return 0
+end
+return 1
+`)
+
+var eventAdmissionScript = redis.NewScript(`
+local event_counter = KEYS[1]
+local client_counter = KEYS[2]
+local ttl_seconds = tonumber(ARGV[1])
+local event_limit = tonumber(ARGV[2])
+local client_limit = tonumber(ARGV[3])
+
+local function incrWithTTL(key)
+	local count = redis.call("INCR", key)
+	if count == 1 or redis.call("TTL", key) < 0 then
+		redis.call("EXPIRE", key, ttl_seconds)
+	end
+	return count
+end
+
+local event_count = incrWithTTL(event_counter)
+if event_count > event_limit then
+	redis.call("DECR", event_counter)
+	redis.call("EXPIRE", event_counter, ttl_seconds)
+	return 0
+end
+
+local client_count = incrWithTTL(client_counter)
+if client_count > client_limit then
+	redis.call("DECR", event_counter)
+	redis.call("DECR", client_counter)
+	redis.call("EXPIRE", event_counter, ttl_seconds)
+	redis.call("EXPIRE", client_counter, ttl_seconds)
+	return 0
+end
 
 return 1
 `)

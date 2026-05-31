@@ -183,8 +183,8 @@ func (s *EventService) calculateSeatsSummary(seats []*models.Seat) SeatsSummary 
 // InvalidateEventCache removes the cached event data for the given event ID.
 // This is exposed for use by other services (e.g., BookingService) when seat
 // availability changes.
-func (s *EventService) InvalidateEventCache(eventID uuid.UUID) {
-	s.invalidateEventCache(context.Background(), eventID)
+func (s *EventService) InvalidateEventCache(ctx context.Context, eventID uuid.UUID) {
+	s.invalidateEventCache(ctx, eventID)
 }
 
 func (s *EventService) getEventFromCache(ctx context.Context, id uuid.UUID) (*models.Event, error) {

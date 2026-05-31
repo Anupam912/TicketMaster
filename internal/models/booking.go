@@ -23,8 +23,9 @@ type Booking struct {
 	Status      BookingStatus `json:"status" db:"status"`
 	TotalAmount float64       `json:"total_amount" db:"total_amount"`
 	ReservedAt  time.Time     `json:"reserved_at" db:"reserved_at"`
-	PurchasedAt *time.Time    `json:"purchased_at,omitempty" db:"purchased_at"`
-	ExpiresAt   time.Time     `json:"expires_at" db:"expires_at"`
+	PurchasedAt       *time.Time `json:"purchased_at,omitempty" db:"purchased_at"`
+	PaymentIntentID   *string    `json:"payment_intent_id,omitempty" db:"payment_intent_id"`
+	ExpiresAt         time.Time  `json:"expires_at" db:"expires_at"`
 	CreatedAt   time.Time     `json:"created_at" db:"created_at"`
 	UpdatedAt   time.Time     `json:"updated_at" db:"updated_at"`
 }

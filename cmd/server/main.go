@@ -70,13 +70,15 @@ func main() {
 		defer appredis.Close()
 		log.Println("Redis connected successfully")
 	}
-
-	hub := websocket.NewHubWithConfig(cfg)
-	hub.SetRedis(redisClient)
-	go hub.Run()
+	database.InitSeatReadRouting(redisClient)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	hub := websocket.NewHubWithConfig(cfg)
+	hub.SetRedis(redisClient)
+	hub.SetContext(ctx)
+	go hub.Run()
 	go hub.StartFanout(ctx)
 
 	bookingRepo := repository.NewBookingRepository()
@@ -121,15 +123,19 @@ func main() {
 	}
 
 	if redisClient != nil {
-		go services.NewBatchReleaseWorker(bookingService, expiryQueue).Run(ctx)
+		batchReleaseWorker, err := services.NewBatchReleaseWorker(bookingService, expiryQueue, cfg)
+		if err != nil {
+			log.Fatalf("Failed to configure batch release worker: %v", err)
+		}
+		go batchReleaseWorker.Run(ctx)
 		log.Println("Batch release worker started")
 	}
-	go startCleanupJob(ctx, bookingService)
+	go services.RunExpiredReservationCleanup(ctx, bookingService)
 
 	q := queue.NewQueue(cfg, redisClient)
 	q.SetMaxRetries(cfg.Queue.MaxRetries)
 	if q.Enabled() {
-		bookingWorker := services.NewBookingWorker(bookingService, q, hub, cfg)
+		bookingWorker := services.NewBookingWorker(bookingService, seatRepo, q, hub, cfg)
 		go bookingWorker.StartBookingWorker(ctx)
 		log.Println("Booking worker started")
 
@@ -168,12 +174,18 @@ func main() {
 	<-sigChan
 	log.Println("Shutting down server...")
 	cancel()
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownTimeoutSec)*time.Second)
 	defer shutdownCancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
 	}
+
 	time.Sleep(500 * time.Millisecond)
+
+	if err := q.Close(); err != nil {
+		log.Printf("Kafka queue close error: %v", err)
+	}
 }
 
 func shouldRunStartupMigrations() bool {
@@ -190,18 +202,3 @@ func shouldRunStartupMigrations() bool {
 		os.Getenv("RAILWAY_SERVICE_ID") != ""
 }
 
-func startCleanupJob(ctx context.Context, bookingService *services.BookingService) {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := bookingService.CleanupExpiredReservations(ctx); err != nil {
-				log.Printf("Error cleaning up expired reservations: %v", err)
-			}
-		}
-	}
-}

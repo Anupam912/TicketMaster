@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -45,32 +46,79 @@ func (c *BookingEventConsumer) Run(ctx context.Context) {
 		default:
 			consumed, err := c.consumer.Fetch(ctx)
 			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return
+				}
 				if consumed != nil {
-					_ = c.consumer.DeadLetter(ctx, consumed, err.Error())
-					_ = c.consumer.Ack(ctx, consumed)
-					log.Printf("Booking event moved to DLQ: %v", err)
+					c.deadLetterThenAck(ctx, consumed, err.Error(), "booking event fetch/decode")
 					continue
 				}
 				log.Printf("Error fetching booking event: %v", err)
-				time.Sleep(bookingEventConsumerBackoff)
+				if !waitWithContext(ctx, bookingEventConsumerBackoff) {
+					return
+				}
 				continue
 			}
 			if consumed == nil {
+				if !waitWithContext(ctx, bookingEventConsumerBackoff) {
+					return
+				}
 				continue
 			}
 
 			if err := c.handle(ctx, consumed.Event); err != nil {
-				_ = c.consumer.DeadLetter(ctx, consumed, err.Error())
-				_ = c.consumer.Ack(ctx, consumed)
-				log.Printf("Booking event handler failed and event moved to DLQ: %v", err)
+				c.deadLetterThenAck(ctx, consumed, err.Error(), "booking event handler")
 				continue
 			}
 
 			if err := c.consumer.Ack(ctx, consumed); err != nil {
-				log.Printf("Error acking booking event: %v", err)
+				log.Printf(
+					"Booking event ack failed (partition=%d offset=%d): %v",
+					consumed.Partition,
+					consumed.Offset,
+					err,
+				)
 			}
 		}
 	}
+}
+
+// deadLetterThenAck publishes a failed message to the DLQ and commits the offset only when publish succeeds.
+func (c *BookingEventConsumer) deadLetterThenAck(
+	ctx context.Context,
+	consumed *kafka.ConsumedBookingEvent,
+	reason string,
+	stage string,
+) {
+	if err := c.consumer.DeadLetter(ctx, consumed, reason); err != nil {
+		log.Printf(
+			"%s: DLQ publish failed (partition=%d offset=%d): %v; message not acked",
+			stage,
+			consumed.Partition,
+			consumed.Offset,
+			err,
+		)
+		return
+	}
+
+	if err := c.consumer.Ack(ctx, consumed); err != nil {
+		log.Printf(
+			"%s: ack failed after DLQ (partition=%d offset=%d): %v",
+			stage,
+			consumed.Partition,
+			consumed.Offset,
+			err,
+		)
+		return
+	}
+
+	log.Printf(
+		"%s: moved to DLQ and acked (partition=%d offset=%d): %s",
+		stage,
+		consumed.Partition,
+		consumed.Offset,
+		reason,
+	)
 }
 
 func (c *BookingEventConsumer) handle(ctx context.Context, event *kafka.BookingEvent) error {
@@ -88,7 +136,7 @@ func (c *BookingEventConsumer) handle(ctx context.Context, event *kafka.BookingE
 	}
 
 	if c.cacheInvalidator != nil {
-		c.cacheInvalidator(eventID)
+		c.cacheInvalidator(ctx, eventID)
 	}
 
 	if c.hub != nil {
@@ -108,6 +156,19 @@ func (c *BookingEventConsumer) handle(ctx context.Context, event *kafka.BookingE
 	)
 
 	return nil
+}
+
+// waitWithContext sleeps for d or until ctx is cancelled.
+func waitWithContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func seatStatusForBookingEvent(eventType string) (string, bool) {

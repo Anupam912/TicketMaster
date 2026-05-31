@@ -132,7 +132,7 @@ func (r *SeatRepository) ReserveSeatWithLock(eventID uuid.UUID, seatNumber strin
 			return nil, ErrSeatNotFound
 		}
 
-		if err.Error() == "pq: could not obtain lock on row in relation \"seats\"" {
+		if isLockNotAvailable(err) {
 			return nil, ErrSeatAlreadyBooked
 		}
 		return nil, err
@@ -224,7 +224,7 @@ func (r *SeatRepository) FindByEventID(ctx context.Context, eventID uuid.UUID, s
 		args = []interface{}{eventID}
 	}
 
-	rows, err := database.GetReadDB().QueryContext(ctx, query, args...)
+	rows, err := database.DBForSeatRead(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query seats by event: %w", err)
 	}

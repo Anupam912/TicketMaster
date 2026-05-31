@@ -90,13 +90,11 @@ func (c *BookingEventConsumer) Fetch(ctx context.Context) (*ConsumedBookingEvent
 		return nil, nil
 	}
 
-	fetchCtx, cancel := context.WithTimeout(ctx, bookingEventFetchTimeout)
-	defer cancel()
-
-	msg, err := c.reader.FetchMessage(fetchCtx)
+	// Block until a message arrives, MaxWait elapses, or ctx is cancelled (no per-call timeout spin).
+	msg, err := c.reader.FetchMessage(ctx)
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return nil, nil
+		if errors.Is(err, context.Canceled) {
+			return nil, err
 		}
 		if errors.Is(err, io.EOF) {
 			c.resetReader()

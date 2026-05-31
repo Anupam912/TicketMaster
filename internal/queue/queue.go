@@ -164,6 +164,40 @@ func (q *Queue) Enabled() bool {
 	return q != nil && q.kafkaEnabled
 }
 
+// Close closes all Kafka readers created for booking and purchase workers.
+func (q *Queue) Close() error {
+	if q == nil || !q.kafkaEnabled {
+		return nil
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	var err error
+	for group, reader := range q.bookingReaders {
+		if closeErr := reader.Close(); closeErr != nil {
+			err = joinCloseErrors(err, fmt.Errorf("booking reader %q: %w", group, closeErr))
+		}
+	}
+	q.bookingReaders = make(map[string]*kafkago.Reader)
+
+	for group, reader := range q.purchaseReaders {
+		if closeErr := reader.Close(); closeErr != nil {
+			err = joinCloseErrors(err, fmt.Errorf("purchase reader %q: %w", group, closeErr))
+		}
+	}
+	q.purchaseReaders = make(map[string]*kafkago.Reader)
+
+	return err
+}
+
+func joinCloseErrors(existing, next error) error {
+	if existing == nil {
+		return next
+	}
+	return fmt.Errorf("%v; %w", existing, next)
+}
+
 func (q *Queue) SetMaxRetries(maxRetries int) {
 	if maxRetries < 0 {
 		maxRetries = 0
