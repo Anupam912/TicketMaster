@@ -4,18 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"time"
 
 	"event-ticketing-system/internal/config"
 	"event-ticketing-system/internal/models"
 	"event-ticketing-system/internal/queue"
 	"event-ticketing-system/internal/repository"
 	"event-ticketing-system/internal/websocket"
-
-	"github.com/google/uuid"
 )
-
-const workerDequeueBackoff = time.Second
 
 type BookingWorker struct {
 	bookingService *BookingService
@@ -42,39 +37,18 @@ func NewBookingWorker(
 }
 
 func (w *BookingWorker) StartBookingWorker(ctx context.Context) {
-	consumerGroup := "booking-workers"
-	consumerID := fmt.Sprintf("booking-worker-%s", uuid.New().String()[:8])
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Println("Booking worker shutting down...")
-			return
-		default:
-			job, messageID, err := w.queue.DequeueBookingJob(ctx, consumerGroup, consumerID)
-			if err != nil {
-				log.Printf("Error dequeuing booking job: %v", err)
-				if !waitWithContext(ctx, workerDequeueBackoff) {
-					return
-				}
-				continue
-			}
-
-			if job == nil {
-				if !waitWithContext(ctx, workerDequeueBackoff) {
-					return
-				}
-				continue
-			}
-
-			if err := w.processBookingJob(ctx, consumerGroup, messageID, job); err != nil {
-				log.Printf("Error processing booking job %s: %v", job.ID, err)
-			}
-		}
+	log.Println("Starting booking worker with ConsumerGroup API...")
+	
+	handler := func(ctx context.Context, job *queue.BookingJob, messageID string) error {
+		return w.processBookingJob(ctx, job, messageID)
+	}
+	
+	if err := w.queue.StartBookingConsumer(ctx, handler); err != nil {
+		log.Printf("Failed to start booking consumer: %v", err)
 	}
 }
 
-func (w *BookingWorker) processBookingJob(ctx context.Context, consumerGroup, messageID string, job *queue.BookingJob) error {
+func (w *BookingWorker) processBookingJob(ctx context.Context, job *queue.BookingJob, messageID string) error {
 	req := &models.ReserveSeatRequest{
 		EventID:    job.EventID,
 		SeatNumber: job.SeatNumber,
@@ -83,12 +57,10 @@ func (w *BookingWorker) processBookingJob(ctx context.Context, consumerGroup, me
 	booking, err := w.bookingService.ReserveSeat(ctx, job.UserID, req)
 	if err != nil {
 		_ = w.queue.HandleBookingJobFailure(ctx, job, err.Error())
-		_ = w.queue.AckBookingJob(ctx, consumerGroup, messageID)
 		return fmt.Errorf("failed to reserve seat: %w", err)
 	}
 
 	_ = w.queue.CompleteJob(ctx, job.ID, booking.ID)
-	_ = w.queue.AckBookingJob(ctx, consumerGroup, messageID)
 
 	if w.hub != nil {
 		seat, err := w.seatRepo.FindByEventAndSeatNumber(job.EventID, job.SeatNumber)
@@ -120,48 +92,25 @@ func NewPurchaseWorker(
 }
 
 func (w *PurchaseWorker) StartPurchaseWorker(ctx context.Context) {
-	consumerGroup := "purchase-workers"
-	consumerID := fmt.Sprintf("purchase-worker-%s", uuid.New().String()[:8])
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Println("Purchase worker shutting down...")
-			return
-		default:
-			job, messageID, err := w.queue.DequeuePurchaseJob(ctx, consumerGroup, consumerID)
-			if err != nil {
-				log.Printf("Error dequeuing purchase job: %v", err)
-				if !waitWithContext(ctx, workerDequeueBackoff) {
-					return
-				}
-				continue
-			}
-
-			if job == nil {
-				if !waitWithContext(ctx, workerDequeueBackoff) {
-					return
-				}
-				continue
-			}
-
-			if err := w.processPurchaseJob(ctx, consumerGroup, messageID, job); err != nil {
-				log.Printf("Error processing purchase job %s: %v", job.ID, err)
-			}
-		}
+	log.Println("Starting purchase worker with ConsumerGroup API...")
+	
+	handler := func(ctx context.Context, job *queue.PurchaseJob, messageID string) error {
+		return w.processPurchaseJob(ctx, job, messageID)
+	}
+	
+	if err := w.queue.StartPurchaseConsumer(ctx, handler); err != nil {
+		log.Printf("Failed to start purchase consumer: %v", err)
 	}
 }
 
-func (w *PurchaseWorker) processPurchaseJob(ctx context.Context, consumerGroup, messageID string, job *queue.PurchaseJob) error {
+func (w *PurchaseWorker) processPurchaseJob(ctx context.Context, job *queue.PurchaseJob, messageID string) error {
 	booking, err := w.bookingService.PurchaseBooking(ctx, job.UserID, job.BookingID)
 	if err != nil {
 		_ = w.queue.HandlePurchaseJobFailure(ctx, job, err.Error())
-		_ = w.queue.AckPurchaseJob(ctx, consumerGroup, messageID)
 		return fmt.Errorf("failed to purchase booking: %w", err)
 	}
 
 	_ = w.queue.CompleteJob(ctx, job.ID, booking.ID)
-	_ = w.queue.AckPurchaseJob(ctx, consumerGroup, messageID)
 
 	if w.hub != nil {
 		w.hub.BroadcastSeatUpdate(booking.EventID, booking.SeatID, "sold")

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,6 +32,8 @@ const (
 	purchaseDepthKey = "kafka:queue:purchase:depth"
 	bookingDLQKey    = "kafka:queue:booking:dlq:depth"
 	purchaseDLQKey   = "kafka:queue:purchase:dlq:depth"
+
+	maxBytesPerFetch = 1e6
 )
 
 const (
@@ -85,6 +86,8 @@ type QueueMetrics struct {
 	BookingPending      int64 `json:"booking_pending"`
 	PurchasePending     int64 `json:"purchase_pending"`
 	MaxRetries          int   `json:"max_retries"`
+	BookingReaders      int   `json:"booking_readers"`
+	PurchaseReaders     int   `json:"purchase_readers"`
 }
 
 type Queue struct {
@@ -105,23 +108,24 @@ type Queue struct {
 	bookingDLQW    *kafkago.Writer
 	purchaseDLQW   *kafkago.Writer
 
-	mu              sync.Mutex
-	bookingReaders  map[string]*kafkago.Reader
-	purchaseReaders map[string]*kafkago.Reader
+	bookingGroup  *kafkago.ConsumerGroup
+	purchaseGroup *kafkago.ConsumerGroup
+
+	bookingCancel  context.CancelFunc
+	purchaseCancel context.CancelFunc
 
 	localStatus sync.Map
+	wg          sync.WaitGroup
 }
 
 func NewQueue(cfg *config.Config, redisClient *redis.Client) *Queue {
 	q := &Queue{
-		redis:           redisClient,
-		maxRetries:      defaultMaxRetries,
-		bookingReaders:  make(map[string]*kafkago.Reader),
-		purchaseReaders: make(map[string]*kafkago.Reader),
-		bookingTopic:    defaultBookingTopic,
-		purchaseTopic:   defaultPurchaseTopic,
-		bookingDLQ:      defaultBookingDLQ,
-		purchaseDLQ:     defaultPurchaseDLQ,
+		redis:         redisClient,
+		maxRetries:    defaultMaxRetries,
+		bookingTopic:  defaultBookingTopic,
+		purchaseTopic: defaultPurchaseTopic,
+		bookingDLQ:    defaultBookingDLQ,
+		purchaseDLQ:   defaultPurchaseDLQ,
 	}
 
 	if cfg != nil {
@@ -144,6 +148,18 @@ func NewQueue(cfg *config.Config, redisClient *redis.Client) *Queue {
 			q.purchaseWriter = newKafkaWriter(cfg.Kafka.Brokers, q.purchaseTopic)
 			q.bookingDLQW = newKafkaWriter(cfg.Kafka.Brokers, q.bookingDLQ)
 			q.purchaseDLQW = newKafkaWriter(cfg.Kafka.Brokers, q.purchaseDLQ)
+
+			var err error
+			q.bookingGroup, err = newConsumerGroup(cfg.Kafka.Brokers, "booking-workers", []string{q.bookingTopic})
+			if err != nil {
+				q.kafkaEnabled = false
+				return q
+			}
+			q.purchaseGroup, err = newConsumerGroup(cfg.Kafka.Brokers, "purchase-workers", []string{q.purchaseTopic})
+			if err != nil {
+				q.kafkaEnabled = false
+				return q
+			}
 		}
 	}
 
@@ -160,33 +176,44 @@ func newKafkaWriter(brokers []string, topic string) *kafkago.Writer {
 	}
 }
 
+func newConsumerGroup(brokers []string, groupID string, topics []string) (*kafkago.ConsumerGroup, error) {
+	return kafkago.NewConsumerGroup(kafkago.ConsumerGroupConfig{
+		ID:      groupID,
+		Brokers: brokers,
+		Topics:  topics,
+	})
+}
+
 func (q *Queue) Enabled() bool {
 	return q != nil && q.kafkaEnabled
 }
 
-// Close closes all Kafka readers created for booking and purchase workers.
+// Close closes all Kafka consumer groups and writers.
 func (q *Queue) Close() error {
 	if q == nil || !q.kafkaEnabled {
 		return nil
 	}
 
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	if q.bookingCancel != nil {
+		q.bookingCancel()
+	}
+	if q.purchaseCancel != nil {
+		q.purchaseCancel()
+	}
+
+	q.wg.Wait()
 
 	var err error
-	for group, reader := range q.bookingReaders {
-		if closeErr := reader.Close(); closeErr != nil {
-			err = joinCloseErrors(err, fmt.Errorf("booking reader %q: %w", group, closeErr))
+	if q.bookingGroup != nil {
+		if closeErr := q.bookingGroup.Close(); closeErr != nil {
+			err = joinCloseErrors(err, fmt.Errorf("booking group: %w", closeErr))
 		}
 	}
-	q.bookingReaders = make(map[string]*kafkago.Reader)
-
-	for group, reader := range q.purchaseReaders {
-		if closeErr := reader.Close(); closeErr != nil {
-			err = joinCloseErrors(err, fmt.Errorf("purchase reader %q: %w", group, closeErr))
+	if q.purchaseGroup != nil {
+		if closeErr := q.purchaseGroup.Close(); closeErr != nil {
+			err = joinCloseErrors(err, fmt.Errorf("purchase group: %w", closeErr))
 		}
 	}
-	q.purchaseReaders = make(map[string]*kafkago.Reader)
 
 	return err
 }
@@ -259,90 +286,180 @@ func (q *Queue) EnqueuePurchaseJob(ctx context.Context, job *PurchaseJob) error 
 	return nil
 }
 
-func (q *Queue) DequeueBookingJob(ctx context.Context, consumerGroup, _ string) (*BookingJob, string, error) {
-	if !q.kafkaEnabled {
-		return nil, "", ErrKafkaUnavailable
-	}
-
-	reader := q.getBookingReader(consumerGroup)
-	pollCtx, cancel := context.WithTimeout(ctx, dequeueBlockTime)
-	defer cancel()
-
-	msg, err := reader.FetchMessage(pollCtx)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return nil, "", nil
-		}
-		if errors.Is(err, io.EOF) {
-			q.resetBookingReader(consumerGroup)
-			return nil, "", nil
-		}
-		return nil, "", fmt.Errorf("fetch booking command: %w", err)
-	}
-
-	var job BookingJob
-	if err := json.Unmarshal(msg.Value, &job); err != nil {
-		return nil, "", fmt.Errorf("unmarshal booking command: %w", err)
-	}
-
-	q.bumpCounter(ctx, bookingDepthKey, -1)
-	messageID := fmt.Sprintf("%d:%d", msg.Partition, msg.Offset)
-	return &job, messageID, nil
-}
-
-func (q *Queue) DequeuePurchaseJob(ctx context.Context, consumerGroup, _ string) (*PurchaseJob, string, error) {
-	if !q.kafkaEnabled {
-		return nil, "", ErrKafkaUnavailable
-	}
-
-	reader := q.getPurchaseReader(consumerGroup)
-	pollCtx, cancel := context.WithTimeout(ctx, dequeueBlockTime)
-	defer cancel()
-
-	msg, err := reader.FetchMessage(pollCtx)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return nil, "", nil
-		}
-		if errors.Is(err, io.EOF) {
-			q.resetPurchaseReader(consumerGroup)
-			return nil, "", nil
-		}
-		return nil, "", fmt.Errorf("fetch purchase command: %w", err)
-	}
-
-	var job PurchaseJob
-	if err := json.Unmarshal(msg.Value, &job); err != nil {
-		return nil, "", fmt.Errorf("unmarshal purchase command: %w", err)
-	}
-
-	q.bumpCounter(ctx, purchaseDepthKey, -1)
-	messageID := fmt.Sprintf("%d:%d", msg.Partition, msg.Offset)
-	return &job, messageID, nil
-}
-
-func (q *Queue) AckBookingJob(ctx context.Context, consumerGroup, messageID string) error {
-	if !q.kafkaEnabled {
+// StartBookingConsumer starts the consumer group generation loop for booking commands.
+func (q *Queue) StartBookingConsumer(ctx context.Context, handler func(context.Context, *BookingJob, string) error) error {
+	if !q.kafkaEnabled || q.bookingGroup == nil {
 		return ErrKafkaUnavailable
 	}
-	partition, offset, err := parseMessageID(messageID)
-	if err != nil {
-		return err
-	}
-	reader := q.getBookingReader(consumerGroup)
-	return reader.CommitMessages(ctx, kafkago.Message{Topic: q.bookingTopic, Partition: partition, Offset: offset})
+
+	consumerCtx, cancel := context.WithCancel(ctx)
+	q.bookingCancel = cancel
+
+	q.wg.Add(1)
+	go func() {
+		defer q.wg.Done()
+		q.runConsumerGroup(consumerCtx, q.bookingGroup, q.bookingTopic, bookingDepthKey, handler)
+	}()
+
+	return nil
 }
 
-func (q *Queue) AckPurchaseJob(ctx context.Context, consumerGroup, messageID string) error {
-	if !q.kafkaEnabled {
+func (q *Queue) runConsumerGroup(ctx context.Context, group *kafkago.ConsumerGroup, topic, depthKey string, handler func(context.Context, *BookingJob, string) error) {
+	for {
+		gen, err := group.Next(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			continue
+		}
+
+		assignments := gen.Assignments[topic]
+		for _, assignment := range assignments {
+			partition, offset := assignment.ID, assignment.Offset
+
+			gen.Start(func(genCtx context.Context) {
+				reader := kafkago.NewReader(kafkago.ReaderConfig{
+					Brokers:   q.brokers,
+					Topic:     topic,
+					Partition: partition,
+					MinBytes:  1,
+					MaxBytes:  maxBytesPerFetch,
+					MaxWait:   dequeueBlockTime,
+				})
+				defer reader.Close()
+
+				reader.SetOffset(offset)
+				currentOffset := offset
+
+				for {
+					msg, err := reader.ReadMessage(genCtx)
+					if err != nil {
+						if errors.Is(err, kafkago.ErrGenerationEnded) {
+							gen.CommitOffsets(map[string]map[int]int64{topic: {partition: currentOffset + 1}})
+							return
+						}
+						if errors.Is(err, context.Canceled) {
+							return
+						}
+						continue
+					}
+
+					var job BookingJob
+					if err := json.Unmarshal(msg.Value, &job); err != nil {
+						currentOffset = msg.Offset
+						continue
+					}
+
+					messageID := fmt.Sprintf("%d:%d", msg.Partition, msg.Offset)
+					if err := handler(genCtx, &job, messageID); err != nil {
+						continue
+					}
+
+					q.bumpCounter(ctx, depthKey, -1)
+					currentOffset = msg.Offset
+				}
+			})
+		}
+	}
+}
+
+// DequeueBookingJob is deprecated. Use StartBookingConsumer instead.
+func (q *Queue) DequeueBookingJob(ctx context.Context, _, _ string) (*BookingJob, string, error) {
+	return nil, "", fmt.Errorf("DequeueBookingJob deprecated: use StartBookingConsumer with handler")
+}
+
+// StartPurchaseConsumer starts the consumer group generation loop for purchase commands.
+func (q *Queue) StartPurchaseConsumer(ctx context.Context, handler func(context.Context, *PurchaseJob, string) error) error {
+	if !q.kafkaEnabled || q.purchaseGroup == nil {
 		return ErrKafkaUnavailable
 	}
-	partition, offset, err := parseMessageID(messageID)
-	if err != nil {
-		return err
+
+	consumerCtx, cancel := context.WithCancel(ctx)
+	q.purchaseCancel = cancel
+
+	q.wg.Add(1)
+	go func() {
+		defer q.wg.Done()
+		q.runPurchaseConsumerGroup(consumerCtx, q.purchaseGroup, q.purchaseTopic, purchaseDepthKey, handler)
+	}()
+
+	return nil
+}
+
+func (q *Queue) runPurchaseConsumerGroup(ctx context.Context, group *kafkago.ConsumerGroup, topic, depthKey string, handler func(context.Context, *PurchaseJob, string) error) {
+	for {
+		gen, err := group.Next(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			continue
+		}
+
+		assignments := gen.Assignments[topic]
+		for _, assignment := range assignments {
+			partition, offset := assignment.ID, assignment.Offset
+
+			gen.Start(func(genCtx context.Context) {
+				reader := kafkago.NewReader(kafkago.ReaderConfig{
+					Brokers:   q.brokers,
+					Topic:     topic,
+					Partition: partition,
+					MinBytes:  1,
+					MaxBytes:  maxBytesPerFetch,
+					MaxWait:   dequeueBlockTime,
+				})
+				defer reader.Close()
+
+				reader.SetOffset(offset)
+				currentOffset := offset
+
+				for {
+					msg, err := reader.ReadMessage(genCtx)
+					if err != nil {
+						if errors.Is(err, kafkago.ErrGenerationEnded) {
+							gen.CommitOffsets(map[string]map[int]int64{topic: {partition: currentOffset + 1}})
+							return
+						}
+						if errors.Is(err, context.Canceled) {
+							return
+						}
+						continue
+					}
+
+					var job PurchaseJob
+					if err := json.Unmarshal(msg.Value, &job); err != nil {
+						currentOffset = msg.Offset
+						continue
+					}
+
+					messageID := fmt.Sprintf("%d:%d", msg.Partition, msg.Offset)
+					if err := handler(genCtx, &job, messageID); err != nil {
+						continue
+					}
+
+					q.bumpCounter(ctx, depthKey, -1)
+					currentOffset = msg.Offset
+				}
+			})
+		}
 	}
-	reader := q.getPurchaseReader(consumerGroup)
-	return reader.CommitMessages(ctx, kafkago.Message{Topic: q.purchaseTopic, Partition: partition, Offset: offset})
+}
+
+// DequeuePurchaseJob is deprecated. Use StartPurchaseConsumer instead.
+func (q *Queue) DequeuePurchaseJob(ctx context.Context, _, _ string) (*PurchaseJob, string, error) {
+	return nil, "", fmt.Errorf("DequeuePurchaseJob deprecated: use StartPurchaseConsumer with handler")
+}
+
+// AckBookingJob is deprecated. Commits are handled automatically by ConsumerGroup.
+func (q *Queue) AckBookingJob(ctx context.Context, _, messageID string) error {
+	return nil
+}
+
+// AckPurchaseJob is deprecated. Commits are handled automatically by ConsumerGroup.
+func (q *Queue) AckPurchaseJob(ctx context.Context, _, messageID string) error {
+	return nil
 }
 
 func (q *Queue) GetJobStatus(ctx context.Context, jobID uuid.UUID) (*JobStatus, error) {
@@ -461,6 +578,14 @@ func (q *Queue) GetMetrics(ctx context.Context, _, _ string) (*QueueMetrics, err
 	if !q.kafkaEnabled {
 		return nil, ErrKafkaUnavailable
 	}
+	bookingGroups := 0
+	if q.bookingGroup != nil {
+		bookingGroups = 1
+	}
+	purchaseGroups := 0
+	if q.purchaseGroup != nil {
+		purchaseGroups = 1
+	}
 	return &QueueMetrics{
 		BookingQueueLength:  q.readCounter(ctx, bookingDepthKey),
 		PurchaseQueueLength: q.readCounter(ctx, purchaseDepthKey),
@@ -469,6 +594,8 @@ func (q *Queue) GetMetrics(ctx context.Context, _, _ string) (*QueueMetrics, err
 		BookingPending:      0,
 		PurchasePending:     0,
 		MaxRetries:          q.maxRetries,
+		BookingReaders:      bookingGroups,
+		PurchaseReaders:     purchaseGroups,
 	}, nil
 }
 
@@ -494,61 +621,6 @@ func (q *Queue) setJobStatus(ctx context.Context, status *JobStatus) error {
 	return nil
 }
 
-func (q *Queue) getBookingReader(group string) *kafkago.Reader {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if r, ok := q.bookingReaders[group]; ok {
-		return r
-	}
-	r := kafkago.NewReader(kafkago.ReaderConfig{
-		Brokers:        q.brokers,
-		GroupID:        group,
-		Topic:          q.bookingTopic,
-		MinBytes:       1,
-		MaxBytes:       10e6,
-		MaxWait:        dequeueBlockTime,
-		CommitInterval: 0,
-	})
-	q.bookingReaders[group] = r
-	return r
-}
-
-func (q *Queue) getPurchaseReader(group string) *kafkago.Reader {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if r, ok := q.purchaseReaders[group]; ok {
-		return r
-	}
-	r := kafkago.NewReader(kafkago.ReaderConfig{
-		Brokers:        q.brokers,
-		GroupID:        group,
-		Topic:          q.purchaseTopic,
-		MinBytes:       1,
-		MaxBytes:       10e6,
-		MaxWait:        dequeueBlockTime,
-		CommitInterval: 0,
-	})
-	q.purchaseReaders[group] = r
-	return r
-}
-
-func (q *Queue) resetBookingReader(group string) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if reader, ok := q.bookingReaders[group]; ok {
-		_ = reader.Close()
-		delete(q.bookingReaders, group)
-	}
-}
-
-func (q *Queue) resetPurchaseReader(group string) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if reader, ok := q.purchaseReaders[group]; ok {
-		_ = reader.Close()
-		delete(q.purchaseReaders, group)
-	}
-}
 
 func parseMessageID(messageID string) (int, int64, error) {
 	parts := strings.Split(messageID, ":")
@@ -590,3 +662,4 @@ func (q *Queue) readCounter(ctx context.Context, key string) int64 {
 	}
 	return v
 }
+

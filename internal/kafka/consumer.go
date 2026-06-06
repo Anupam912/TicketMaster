@@ -126,9 +126,9 @@ func (c *BookingEventConsumer) newReader() *kafkago.Reader {
 		GroupID:        c.groupID,
 		Topic:          c.topic,
 		MinBytes:       1,
-		MaxBytes:       10e6,
+		MaxBytes:       1e6,
 		MaxWait:        bookingEventFetchTimeout,
-		CommitInterval: 0,
+		CommitInterval: time.Second,
 	})
 }
 

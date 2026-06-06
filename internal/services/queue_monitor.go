@@ -58,6 +58,16 @@ func (m *QueueMonitor) checkOnce(ctx context.Context) {
 	}
 	telemetry.UpdateQueueMetrics(metrics)
 
+	log.Printf("component=queue_monitor level=info booking_readers=%d purchase_readers=%d booking_queue=%d purchase_queue=%d",
+		metrics.BookingReaders, metrics.PurchaseReaders, metrics.BookingQueueLength, metrics.PurchaseQueueLength)
+
+	if metrics.BookingReaders > 5 {
+		log.Printf("component=queue_monitor level=warn signal=high_booking_reader_count value=%d", metrics.BookingReaders)
+	}
+	if metrics.PurchaseReaders > 5 {
+		log.Printf("component=queue_monitor level=warn signal=high_purchase_reader_count value=%d", metrics.PurchaseReaders)
+	}
+
 	if metrics.BookingQueueLength >= m.config.Queue.AlertBookingQueueLength {
 		telemetry.IncQueueAlert("booking_queue_lag")
 		log.Printf("component=queue_monitor level=warn signal=booking_queue_lag value=%d threshold=%d", metrics.BookingQueueLength, m.config.Queue.AlertBookingQueueLength)
