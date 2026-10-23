@@ -95,6 +95,10 @@ func (r RedisConfig) Addr() string {
 
 type KafkaConfig struct {
 	Brokers                []string
+	SecurityProtocol       string
+	SASLMechanism          string
+	SASLUsername           string
+	SASLPassword           string
 	BookingEventsTopic     string
 	BookingEventsDLQTopic  string
 	BookingCommandsTopic   string
@@ -118,13 +122,13 @@ func (j JWTConfig) ExpiryDuration() time.Duration {
 }
 
 type BookingConfig struct {
-	ReservationTimeoutMinutes      int
-	AdmissionWindowSec             int
-	AdmissionEventLimit            int
-	AdmissionClientLimit           int
-	ExpiryReleaseConcurrency       int
-	ExpiryReleasePartitionCount    int
-	ExpiryReleasePartitionOffset   int
+	ReservationTimeoutMinutes    int
+	AdmissionWindowSec           int
+	AdmissionEventLimit          int
+	AdmissionClientLimit         int
+	ExpiryReleaseConcurrency     int
+	ExpiryReleasePartitionCount  int
+	ExpiryReleasePartitionOffset int
 }
 
 func (b BookingConfig) ReservationTimeout() time.Duration {
@@ -213,6 +217,10 @@ func Load() (*Config, error) {
 		},
 		Kafka: KafkaConfig{
 			Brokers:                getKafkaBrokers(),
+			SecurityProtocol:       getEnv("KAFKA_SECURITY_PROTOCOL", ""),
+			SASLMechanism:          getEnv("KAFKA_SASL_MECHANISM", "PLAIN"),
+			SASLUsername:           getEnv("KAFKA_SASL_USERNAME", ""),
+			SASLPassword:           getEnv("KAFKA_SASL_PASSWORD", ""),
 			BookingEventsTopic:     getEnv("KAFKA_BOOKING_EVENTS_TOPIC", "booking-events"),
 			BookingEventsDLQTopic:  getEnv("KAFKA_BOOKING_EVENTS_DLQ_TOPIC", "booking-events-dlq"),
 			BookingCommandsTopic:   getEnv("KAFKA_BOOKING_COMMANDS_TOPIC", "booking-commands"),
@@ -260,6 +268,9 @@ func Load() (*Config, error) {
 		},
 	}
 
+	if err := config.Kafka.ValidateSecurity(); err != nil {
+		return nil, err
+	}
 	return config, nil
 }
 

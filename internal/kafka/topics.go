@@ -21,7 +21,12 @@ func EnsureTopics(ctx context.Context, cfg *config.Config) error {
 	ensureCtx, cancel := context.WithTimeout(ctx, topicEnsureTimeout)
 	defer cancel()
 
-	conn, err := kafkago.DialContext(ensureCtx, "tcp", cfg.Kafka.Brokers[0])
+	client, err := NewClient(cfg.Kafka)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	conn, err := client.Dialer.DialContext(ensureCtx, "tcp", cfg.Kafka.Brokers[0])
 	if err != nil {
 		return fmt.Errorf("dial kafka broker %s: %w", cfg.Kafka.Brokers[0], err)
 	}

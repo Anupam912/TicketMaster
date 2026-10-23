@@ -27,6 +27,7 @@ type BookingEvent struct {
 }
 
 type Producer struct {
+	client  *Client
 	writer  *kafkago.Writer
 	enabled bool
 	topic   string
@@ -35,6 +36,10 @@ type Producer struct {
 func NewProducer(cfg *config.Config) (*Producer, error) {
 	if cfg == nil || len(cfg.Kafka.Brokers) == 0 {
 		return &Producer{enabled: false}, nil
+	}
+	client, err := NewClient(cfg.Kafka)
+	if err != nil {
+		return nil, err
 	}
 
 	acks := kafkago.RequireOne
@@ -46,6 +51,7 @@ func NewProducer(cfg *config.Config) (*Producer, error) {
 	}
 
 	writer := &kafkago.Writer{
+		Transport:              client.Transport,
 		Addr:                   kafkago.TCP(cfg.Kafka.Brokers...),
 		Topic:                  cfg.Kafka.BookingEventsTopic,
 		RequiredAcks:           acks,
@@ -55,6 +61,7 @@ func NewProducer(cfg *config.Config) (*Producer, error) {
 	}
 
 	return &Producer{
+		client:  client,
 		writer:  writer,
 		enabled: true,
 		topic:   cfg.Kafka.BookingEventsTopic,
@@ -69,7 +76,9 @@ func (p *Producer) Close() error {
 	if !p.Enabled() {
 		return nil
 	}
-	return p.writer.Close()
+	err := p.writer.Close()
+	p.client.Close()
+	return err
 }
 
 func (p *Producer) PublishBookingEvent(ctx context.Context, event *BookingEvent) error {

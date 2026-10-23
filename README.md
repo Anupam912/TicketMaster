@@ -131,6 +131,28 @@ KAFKA_TOPIC_REPLICATION_FACTOR=1
 KAFKA_REQUIRED_ACKS=leader
 ```
 
+For a Kafka broker whose internal listener uses `SASL_PLAINTEXT`, also set these
+variables on the **API service**. The current Railway broker defines the PLAIN
+user `kafka` through its `user_kafka` JAAS entry:
+
+```ini
+KAFKA_SECURITY_PROTOCOL=SASL_PLAINTEXT
+KAFKA_SASL_MECHANISM=PLAIN
+KAFKA_SASL_USERNAME=kafka
+KAFKA_SASL_PASSWORD=${{Kafka.KAFKA_PASSWORD}}
+```
+
+Replace `Kafka` with your broker service name. Keep the private broker address
+in `KAFKA_URL` or `KAFKA_BROKERS` and keep SASL enabled on the broker. Authentication
+applies to command and event producers, consumer groups, partition readers, DLQ
+writers, and startup topic creation. Missing credentials or unsupported security
+settings fail configuration validation instead of silently falling back.
+
+For unauthenticated local Docker Kafka, leave protocol and credentials empty.
+`SASL_SSL` and `SSL` enable TLS with certificate verification; `PLAIN` is the
+supported SASL mechanism. When credentials are supplied without an explicit
+protocol, the app selects `SASL_PLAINTEXT`.
+
 The service creates missing Kafka topics on startup for command, event, and DLQ topics. For Railway's single-broker Kafka templates, keep `KAFKA_TOPIC_REPLICATION_FACTOR=1`.
 
 If Railway logs show `relation "bookings" does not exist`, migrations did not run against the configured database. Set `RUN_MIGRATIONS_ON_START=true` and redeploy. The app also auto-runs migrations when Railway system variables are present unless `RUN_MIGRATIONS_ON_START=false` is set.
@@ -139,4 +161,9 @@ If logs show `Kafka command queue not configured`, the app did not receive a Kaf
 
 If Railway reports a healthcheck failure, inspect the deployment logs before the first `Server starting on :$PORT` line. A fatal migration or database connection error exits the process before `/health` can respond. The healthcheck path should remain `/health`.
 
-If Kafka consumers repeatedly log `EOF`, the broker is closing the connection. Common Railway causes are using a public TCP proxy URL from inside Railway, a Kafka service still restarting, or incorrect advertised listeners. Use the template's private `KAFKA_URL` value for the API service and confirm the Kafka service advertises `PLAINTEXT://${{KAFKA_URL}}`.
+If Kafka consumers repeatedly log `EOF`, check broker logs for SASL handshake
+errors as well as restarts or unreachable advertised listeners. With the current
+authenticated Railway broker, advertise
+`INTERNAL://${{RAILWAY_PRIVATE_DOMAIN}}:9092` and keep the protocol map entry
+`INTERNAL:SASL_PLAINTEXT`. `Unexpected Kafka request ... during SASL handshake`
+means the client has not supplied the required SASL authentication.

@@ -21,7 +21,7 @@ func SetupRoutes(
 	cfg *config.Config,
 	redisClient *redis.Client,
 	hub *websocket.Hub,
-) *gin.Engine {
+) (*gin.Engine, error) {
 	gin.SetMode(cfg.Server.GinMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -43,7 +43,10 @@ func SetupRoutes(
 	seatRepo := repository.NewSeatRepository()
 	bookingRepo := repository.NewBookingRepository()
 
-	q := queue.NewQueue(cfg, redisClient)
+	q, err := queue.NewQueue(cfg, redisClient)
+	if err != nil {
+		return nil, err
+	}
 	q.SetMaxRetries(cfg.Queue.MaxRetries)
 	var bookingQueue *queue.Queue
 	if q.Enabled() {
@@ -59,6 +62,9 @@ func SetupRoutes(
 
 	bookingService.SetCacheInvalidator(eventService.InvalidateEventCache)
 	kafkaProducer, err := kafka.NewProducer(cfg)
+	if err != nil {
+		return nil, err
+	}
 	if err == nil && kafkaProducer.Enabled() {
 		bookingService.SetEventPublisher(services.NewKafkaEventPublisher(kafkaProducer))
 	}
@@ -124,5 +130,5 @@ func SetupRoutes(
 
 	protected.GET("/ws", wsHandler.HandleWebSocket)
 
-	return router
+	return router, nil
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"event-ticketing-system/internal/config"
+	"event-ticketing-system/internal/kafka"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -91,7 +92,8 @@ type QueueMetrics struct {
 }
 
 type Queue struct {
-	redis *redis.Client
+	kafkaClient *kafka.Client
+	redis       *redis.Client
 
 	maxRetries int
 
@@ -118,7 +120,7 @@ type Queue struct {
 	wg          sync.WaitGroup
 }
 
-func NewQueue(cfg *config.Config, redisClient *redis.Client) *Queue {
+func NewQueue(cfg *config.Config, redisClient *redis.Client) (*Queue, error) {
 	q := &Queue{
 		redis:         redisClient,
 		maxRetries:    defaultMaxRetries,
@@ -142,32 +144,37 @@ func NewQueue(cfg *config.Config, redisClient *redis.Client) *Queue {
 			q.purchaseDLQ = cfg.Kafka.PurchaseDLQTopic
 		}
 		if len(cfg.Kafka.Brokers) > 0 {
+			client, err := kafka.NewClient(cfg.Kafka)
+			if err != nil {
+				return nil, err
+			}
+			q.kafkaClient = client
 			q.kafkaEnabled = true
 			q.brokers = cfg.Kafka.Brokers
-			q.bookingWriter = newKafkaWriter(cfg.Kafka.Brokers, q.bookingTopic)
-			q.purchaseWriter = newKafkaWriter(cfg.Kafka.Brokers, q.purchaseTopic)
-			q.bookingDLQW = newKafkaWriter(cfg.Kafka.Brokers, q.bookingDLQ)
-			q.purchaseDLQW = newKafkaWriter(cfg.Kafka.Brokers, q.purchaseDLQ)
+			q.bookingWriter = newKafkaWriter(cfg.Kafka.Brokers, q.bookingTopic, client)
+			q.purchaseWriter = newKafkaWriter(cfg.Kafka.Brokers, q.purchaseTopic, client)
+			q.bookingDLQW = newKafkaWriter(cfg.Kafka.Brokers, q.bookingDLQ, client)
+			q.purchaseDLQW = newKafkaWriter(cfg.Kafka.Brokers, q.purchaseDLQ, client)
 
-			var err error
-			q.bookingGroup, err = newConsumerGroup(cfg.Kafka.Brokers, "booking-workers", []string{q.bookingTopic})
+			q.bookingGroup, err = newConsumerGroup(cfg.Kafka.Brokers, "booking-workers", []string{q.bookingTopic}, client)
 			if err != nil {
-				q.kafkaEnabled = false
-				return q
+				_ = q.Close()
+				return nil, fmt.Errorf("create booking consumer group: %w", err)
 			}
-			q.purchaseGroup, err = newConsumerGroup(cfg.Kafka.Brokers, "purchase-workers", []string{q.purchaseTopic})
+			q.purchaseGroup, err = newConsumerGroup(cfg.Kafka.Brokers, "purchase-workers", []string{q.purchaseTopic}, client)
 			if err != nil {
-				q.kafkaEnabled = false
-				return q
+				_ = q.Close()
+				return nil, fmt.Errorf("create purchase consumer group: %w", err)
 			}
 		}
 	}
 
-	return q
+	return q, nil
 }
 
-func newKafkaWriter(brokers []string, topic string) *kafkago.Writer {
+func newKafkaWriter(brokers []string, topic string, client *kafka.Client) *kafkago.Writer {
 	return &kafkago.Writer{
+		Transport:              client.Transport,
 		Addr:                   kafkago.TCP(brokers...),
 		Topic:                  topic,
 		RequiredAcks:           kafkago.RequireOne,
@@ -176,8 +183,9 @@ func newKafkaWriter(brokers []string, topic string) *kafkago.Writer {
 	}
 }
 
-func newConsumerGroup(brokers []string, groupID string, topics []string) (*kafkago.ConsumerGroup, error) {
+func newConsumerGroup(brokers []string, groupID string, topics []string, client *kafka.Client) (*kafkago.ConsumerGroup, error) {
 	return kafkago.NewConsumerGroup(kafkago.ConsumerGroupConfig{
+		Dialer:  client.Dialer,
 		ID:      groupID,
 		Brokers: brokers,
 		Topics:  topics,
@@ -214,6 +222,14 @@ func (q *Queue) Close() error {
 			err = joinCloseErrors(err, fmt.Errorf("purchase group: %w", closeErr))
 		}
 	}
+	for _, writer := range []*kafkago.Writer{q.bookingWriter, q.purchaseWriter, q.bookingDLQW, q.purchaseDLQW} {
+		if writer != nil {
+			if closeErr := writer.Close(); closeErr != nil {
+				err = joinCloseErrors(err, closeErr)
+			}
+		}
+	}
+	q.kafkaClient.Close()
 
 	return err
 }
@@ -320,6 +336,7 @@ func (q *Queue) runConsumerGroup(ctx context.Context, group *kafkago.ConsumerGro
 
 			gen.Start(func(genCtx context.Context) {
 				reader := kafkago.NewReader(kafkago.ReaderConfig{
+					Dialer:    q.kafkaClient.Dialer,
 					Brokers:   q.brokers,
 					Topic:     topic,
 					Partition: partition,
@@ -403,6 +420,7 @@ func (q *Queue) runPurchaseConsumerGroup(ctx context.Context, group *kafkago.Con
 
 			gen.Start(func(genCtx context.Context) {
 				reader := kafkago.NewReader(kafkago.ReaderConfig{
+					Dialer:    q.kafkaClient.Dialer,
 					Brokers:   q.brokers,
 					Topic:     topic,
 					Partition: partition,
@@ -621,7 +639,6 @@ func (q *Queue) setJobStatus(ctx context.Context, status *JobStatus) error {
 	return nil
 }
 
-
 func parseMessageID(messageID string) (int, int64, error) {
 	parts := strings.Split(messageID, ":")
 	if len(parts) != 2 {
@@ -662,4 +679,3 @@ func (q *Queue) readCounter(ctx context.Context, key string) int64 {
 	}
 	return v
 }
-

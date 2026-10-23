@@ -25,6 +25,7 @@ type ConsumedBookingEvent struct {
 }
 
 type BookingEventConsumer struct {
+	client    *Client
 	reader    *kafkago.Reader
 	dlqWriter *kafkago.Writer
 	enabled   bool
@@ -35,16 +36,22 @@ type BookingEventConsumer struct {
 	mu        sync.Mutex
 }
 
-func NewBookingEventConsumer(cfg *config.Config, groupID string) *BookingEventConsumer {
+func NewBookingEventConsumer(cfg *config.Config, groupID string) (*BookingEventConsumer, error) {
 	if cfg == nil || len(cfg.Kafka.Brokers) == 0 {
-		return &BookingEventConsumer{}
+		return &BookingEventConsumer{}, nil
+	}
+	client, err := NewClient(cfg.Kafka)
+	if err != nil {
+		return nil, err
 	}
 	if groupID == "" {
 		groupID = "booking-event-consumers"
 	}
 
 	consumer := &BookingEventConsumer{
+		client: client,
 		dlqWriter: &kafkago.Writer{
+			Transport:              client.Transport,
 			Addr:                   kafkago.TCP(cfg.Kafka.Brokers...),
 			Topic:                  cfg.Kafka.BookingEventsDLQTopic,
 			RequiredAcks:           kafkaRequiredAcks(cfg.Kafka.RequiredAcks),
@@ -58,7 +65,7 @@ func NewBookingEventConsumer(cfg *config.Config, groupID string) *BookingEventCo
 		dlqTopic: cfg.Kafka.BookingEventsDLQTopic,
 	}
 	consumer.reader = consumer.newReader()
-	return consumer
+	return consumer, nil
 }
 
 func (c *BookingEventConsumer) Enabled() bool {
@@ -82,6 +89,7 @@ func (c *BookingEventConsumer) Close() error {
 			}
 		}
 	}
+	c.client.Close()
 	return err
 }
 
@@ -122,6 +130,7 @@ func (c *BookingEventConsumer) Fetch(ctx context.Context) (*ConsumedBookingEvent
 
 func (c *BookingEventConsumer) newReader() *kafkago.Reader {
 	return kafkago.NewReader(kafkago.ReaderConfig{
+		Dialer:         c.client.Dialer,
 		Brokers:        c.brokers,
 		GroupID:        c.groupID,
 		Topic:          c.topic,

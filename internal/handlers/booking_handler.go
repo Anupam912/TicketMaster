@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"log"
 	"net/http"
 
 	"event-ticketing-system/internal/middleware"
@@ -66,6 +67,7 @@ func (h *BookingHandler) ReserveSeat(c *gin.Context) {
 		}
 
 		if err := h.queue.EnqueueBookingJob(c.Request.Context(), job); err != nil {
+			log.Printf("Failed to enqueue booking command: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to queue booking request"})
 			return
 		}
@@ -142,6 +144,7 @@ func (h *BookingHandler) PurchaseBooking(c *gin.Context) {
 		}
 
 		if err := h.queue.EnqueuePurchaseJob(c.Request.Context(), job); err != nil {
+			log.Printf("Failed to enqueue purchase command: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to queue purchase request"})
 			return
 		}

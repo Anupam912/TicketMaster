@@ -110,7 +110,10 @@ func main() {
 		log.Println("Kafka booking event publisher enabled")
 	}
 
-	bookingEventKafkaConsumer := kafka.NewBookingEventConsumer(cfg, "booking-event-consumers")
+	bookingEventKafkaConsumer, err := kafka.NewBookingEventConsumer(cfg, "booking-event-consumers")
+	if err != nil {
+		log.Fatalf("Failed to configure Kafka event consumer: %v", err)
+	}
 	if bookingEventKafkaConsumer.Enabled() {
 		defer bookingEventKafkaConsumer.Close()
 		bookingEventConsumer := services.NewBookingEventConsumer(
@@ -132,7 +135,11 @@ func main() {
 	}
 	go services.RunExpiredReservationCleanup(ctx, bookingService)
 
-	q := queue.NewQueue(cfg, redisClient)
+	q, err := queue.NewQueue(cfg, redisClient)
+	if err != nil {
+		log.Fatalf("Failed to configure Kafka command queue: %v", err)
+	}
+	defer q.Close()
 	q.SetMaxRetries(cfg.Queue.MaxRetries)
 	if q.Enabled() {
 		bookingWorker := services.NewBookingWorker(bookingService, seatRepo, q, hub, cfg)
@@ -150,7 +157,10 @@ func main() {
 		log.Println("Kafka command queue not configured; async booking queue disabled. Set KAFKA_URL or KAFKA_BROKERS.")
 	}
 
-	router := routes.SetupRoutes(cfg, redisClient, hub)
+	router, err := routes.SetupRoutes(cfg, redisClient, hub)
+	if err != nil {
+		log.Fatalf("Failed to configure API routes: %v", err)
+	}
 
 	addr := fmt.Sprintf(":%s", cfg.Server.Port)
 	log.Printf("Server starting on %s", addr)
@@ -201,4 +211,3 @@ func shouldRunStartupMigrations() bool {
 		os.Getenv("RAILWAY_PROJECT_ID") != "" ||
 		os.Getenv("RAILWAY_SERVICE_ID") != ""
 }
-
